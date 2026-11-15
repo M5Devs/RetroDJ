@@ -13,6 +13,7 @@ test_output.vgm
 *.sym
 *.noi
 *.map
+*.asm
 
 # SGDK copied sources
 targets/genesis/src/core/

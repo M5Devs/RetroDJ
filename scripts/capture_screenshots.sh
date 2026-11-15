@@ -6,7 +6,7 @@ CUR_DIR="$(pwd)"
 
 echo "Capturing NES screenshot using fceux under Xvfb..."
 cat << LUAEOF > /tmp/nes_capture.lua
-for i = 1, 30 do
+for i = 1, 120 do
     emu.frameadvance()
 end
 local f = io.open("${CUR_DIR}/screenshots/nes_screenshot.ppm", "w")
@@ -23,8 +23,17 @@ LUAEOF
 
 xvfb-run -a /usr/games/fceux --sound 0 --loadlua /tmp/nes_capture.lua targets/nes/out/rom.nes >/dev/null 2>&1 &
 FCEUX_PID=$!
-sleep 5
+# Wait for the PPM to finish writing: fceux startup under Xvfb is slow, and the
+# dump is only complete once its size stops growing.
+prev=-1
+for _ in $(seq 1 90); do
+    cur=$(stat -c %s screenshots/nes_screenshot.ppm 2>/dev/null || echo 0)
+    if [ "$cur" -gt 1000 ] && [ "$cur" = "$prev" ]; then break; fi
+    prev=$cur
+    sleep 1
+done
 kill -9 $FCEUX_PID 2>/dev/null || true
+wait $FCEUX_PID 2>/dev/null || true
 
 python3 -c "
 from PIL import Image
@@ -39,7 +48,7 @@ from pyboy import PyBoy
 from PIL import ImageOps
 
 pyboy = PyBoy('targets/gameboy/out/rom.gbc', window="null")
-for _ in range(60):
+for _ in range(120):
     pyboy.tick()
 
 img = pyboy.screen.image

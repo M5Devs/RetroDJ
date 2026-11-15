@@ -24,6 +24,12 @@
     #define RDJ_MAX_CHANNELS 4
     #define RDJ_MAX_PATTERNS 2
     #define RDJ_MAX_ROWS     32
+#elif defined(__PORT_sm83) || defined(__TARGET_gb) || defined(GBDK)
+    /* Game Boy: 4 APU channels. The song must fit in 8 KB WRAM alongside the
+     * console/font runtime, so keep patterns and rows small. */
+    #define RDJ_MAX_CHANNELS 4
+    #define RDJ_MAX_PATTERNS 2
+    #define RDJ_MAX_ROWS     32
 #elif defined(RDJ_GENESIS_HARDWARE) || defined(SGDK_GCC) || defined(__m68k__)
     #define RDJ_MAX_CHANNELS 6
     #define RDJ_MAX_PATTERNS 16
@@ -64,5 +70,12 @@ typedef struct {
     uint8_t       speed;
     rdj_driver_t *driver;
 } rdj_song_t;
+
+#if defined(__PORT_sm83) || defined(__TARGET_gb) || defined(GBDK)
+/* The song must fit in the Game Boy's 8 KB WRAM along with the console/font
+ * runtime. Without this, the 16-bit address space silently wraps and the
+ * song corrupts VRAM/IO registers (garbage tiles, dead display). */
+typedef char rdj_gb_song_fits_wram[(sizeof(rdj_song_t) <= 4096) ? 1 : -1];
+#endif
 
 #endif
