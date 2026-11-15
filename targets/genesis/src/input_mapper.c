@@ -39,6 +39,18 @@ static void audition_note_off(rdj_song_t *song, uint8_t ch) {
 #endif
 }
 
+/* Channel with an A/B audition in flight, or 0xFF when none. The Genesis pad
+ * has a dedicated C button whose release ends an audition; the NES and Game Boy
+ * pads do not, so their A/B auditions are released by the button coming up.
+ * Without this a tapped note would drone on the hardware forever. */
+static uint8_t s_audition_chan = 0xFF;
+
+static void audition_note_on_held(rdj_song_t *song, uint8_t ch, uint8_t note,
+                                  uint8_t inst) {
+    s_audition_chan = ch;
+    audition_note_on(song, ch, note, inst, 128);
+}
+
 /* Pitch to audition: the cell's note, or the current octave's root note when
  * the cell is empty, so a bare audition still sounds. */
 static uint8_t audition_pitch(const input_tracker_state_t *state,
@@ -57,6 +69,7 @@ void input_mapper_init(input_tracker_state_t *state) {
     state->octave = 4;
     state->is_playing = 0;
     state->last_joy = 0;
+    s_audition_chan = 0xFF;
 }
 
 void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_t joy_state) {
@@ -117,12 +130,12 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
 
         if (cell->note != before) {
             /* Note changed: audition it. */
-            audition_note_on(song, state->cursor_channel, cell->note,
-                             cell->instrument, 128);
+            audition_note_on_held(song, state->cursor_channel, cell->note,
+                                  cell->instrument);
         } else if ((pressed & BUTTON_A) && state->cursor_subcol == RDJ_SUBCOL_NOTE) {
             /* Plain A tap on the note column: audition without editing. */
-            audition_note_on(song, state->cursor_channel, audition_pitch(state, cell),
-                             cell->instrument, 128);
+            audition_note_on_held(song, state->cursor_channel,
+                                  audition_pitch(state, cell), cell->instrument);
         }
     } else if (btn_b && !btn_a) {
         /* BUTTON_B + UP/DOWN: Increment/decrement current value by 1 */
@@ -143,8 +156,8 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
                     if (new_note < 1) new_note = 1;
                     if (new_note > 127) new_note = 127;
                     cell->note = (uint8_t)new_note;
-                    audition_note_on(song, state->cursor_channel, cell->note,
-                                     cell->instrument, 128);
+                    audition_note_on_held(song, state->cursor_channel, cell->note,
+                                          cell->instrument);
                     break;
                 }
                 case RDJ_SUBCOL_INST: {
@@ -171,8 +184,8 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
             }
         } else if ((pressed & BUTTON_B) && state->cursor_subcol == RDJ_SUBCOL_NOTE) {
             /* Plain B tap on the note column: audition (pads without a C button). */
-            audition_note_on(song, state->cursor_channel, audition_pitch(state, cell),
-                             cell->instrument, 128);
+            audition_note_on_held(song, state->cursor_channel,
+                                  audition_pitch(state, cell), cell->instrument);
         }
     } else if (!btn_a && !btn_b) {
         /* Normal Cursor Navigation */
@@ -204,10 +217,20 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
 
     /* BUTTON_C (Genesis only): audition while held. */
     if (pressed & BUTTON_C) {
-        audition_note_on(song, state->cursor_channel, audition_pitch(state, cell),
-                         cell->instrument, 128);
+        audition_note_on_held(song, state->cursor_channel,
+                              audition_pitch(state, cell), cell->instrument);
     } else if ((state->last_joy & BUTTON_C) && !(joy_state & BUTTON_C)) {
         audition_note_off(song, state->cursor_channel);
+        s_audition_chan = 0xFF;
+    }
+
+    /* Release an A/B audition once the held button comes back up. BUTTON_C is
+     * excluded: the Genesis C button auditions for as long as it is held and is
+     * released by the block above, so it must not be cut while still down. */
+    if (s_audition_chan != 0xFF &&
+        !(joy_state & (BUTTON_A | BUTTON_B | BUTTON_C))) {
+        audition_note_off(song, s_audition_chan);
+        s_audition_chan = 0xFF;
     }
 
     state->last_joy = joy_state;

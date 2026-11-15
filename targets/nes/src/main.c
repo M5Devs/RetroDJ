@@ -33,8 +33,17 @@ int main(void) {
     nes_2a03_driver.init(1789773);
 
     while (1) {
-        nes_vblank_wait();
+        /* 1. Poll input and format the pending row buffers during visible
+         *    frame time, where there is no cycle budget to respect. */
         ui_update();
+
+        /* 2. Wait for the start of VBlank. */
+        nes_vblank_wait();
+
+        /* 3. Push the staged bytes to VRAM. Keeping this to a raw $2006/$2007
+         *    burst keeps the transfer inside the ~2270-cycle VBlank window, so
+         *    the PPU is never left addressing VRAM while it draws the frame
+         *    (which is what caused the mid-frame tearing). */
         ui_render();
     }
 

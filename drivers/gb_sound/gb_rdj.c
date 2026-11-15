@@ -212,14 +212,19 @@ void gb_sound_note_on(uint8_t ch, uint8_t note, uint8_t inst, uint8_t vol) {
 }
 
 void gb_sound_note_off(uint8_t ch) {
+    /* A note is silenced by zeroing the channel's volume envelope and then
+     * re-triggering it: the length/envelope registers only take effect on a
+     * trigger edge, so writing NRx2 alone leaves the old envelope running and
+     * the channel drones. CH3 has no envelope, so its DAC is switched off
+     * instead, which is the only way to stop a wave channel mid-note. */
     if (ch == 0) {
-        gb_sound_rdj_write(GB_NR12, 0x00);
-        gb_sound_rdj_write(GB_NR14, 0x80); /* Re-trigger silenced envelope */
+        gb_sound_rdj_write(GB_NR12, 0x00); /* Zero volume envelope */
+        gb_sound_rdj_write(GB_NR14, 0x80); /* Trigger cut */
     } else if (ch == 1) {
         gb_sound_rdj_write(GB_NR22, 0x00);
         gb_sound_rdj_write(GB_NR24, 0x80);
     } else if (ch == 2) {
-        gb_sound_rdj_write(GB_NR32, 0x00); /* Output level = Mute */
+        gb_sound_rdj_write(GB_NR30, 0x00); /* Disable Wave DAC */
     } else if (ch == 3) {
         gb_sound_rdj_write(GB_NR42, 0x00);
         gb_sound_rdj_write(GB_NR44, 0x80);

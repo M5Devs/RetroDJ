@@ -28,12 +28,30 @@ static uint8_t s_prev_is_playing = 0;
 static uint8_t s_last_cursor_row = 0;
 static uint8_t s_last_cursor_chan = 0;
 static uint8_t s_last_cursor_subcol = 0;
-static uint8_t s_last_start_row = 0;
 static uint8_t s_last_status_bpm = 0;
 static uint8_t s_last_status_oct = 0;
 static uint8_t s_last_status_ch = 0;
 static uint8_t s_last_status_playing = 0;
-static uint8_t s_old_cursor_row_to_update = 0xFF;
+
+/* One visible row (or the status bar) of pending VRAM work. The string is
+ * formatted during visible frame time; only the raw byte burst runs in VBlank. */
+typedef struct {
+    uint16_t addr;
+    uint8_t  len;
+    char     buf[33];
+} nes_vram_write_t;
+
+#define NES_MAX_STAGE 3
+static nes_vram_write_t s_stage[NES_MAX_STAGE];
+static uint8_t s_stage_count = 0;
+
+/* Shadow copy of the 12 visible pattern rows so a row is re-pushed only when
+ * its rendered text actually changes. s_shadow_start is the pattern row shown
+ * at the top; when it drifts from the desired start_row the shadow is stale and
+ * the grid is refilled one row per frame (a full 12-row burst would overrun
+ * VBlank). */
+static char    s_shadow[12][29];
+static uint8_t s_shadow_start = 0xFF;
 static uint8_t s_scroll_refresh_idx = 0;
 
 #if defined(__NES__) || defined(__CC65__)
@@ -185,6 +203,36 @@ static void format_row_str(uint8_t r, char *out) {
     out[pos] = '\0';
 }
 
+/* Queue one row's raw VRAM burst. The text is produced here (visible frame
+ * time); the PPU burst happens later in ui_render() inside VBlank. */
+static void nes_stage_push(uint16_t addr, const char *str) {
+    nes_vram_write_t *w;
+    uint8_t i;
+
+    if (s_stage_count >= NES_MAX_STAGE) {
+        return;
+    }
+    w = &s_stage[s_stage_count++];
+    w->addr = addr;
+    for (i = 0; i < 32 && str[i]; i++) {
+        w->buf[i] = str[i];
+    }
+    w->len = i;
+}
+
+/* Re-push a visible row only when its text changed. shadow_idx is the slot in
+ * the visible window (0..11). */
+static void nes_stage_row_if_changed(uint8_t shadow_idx, uint8_t pattern_row) {
+    char buf[32];
+
+    format_row_str(pattern_row, buf);
+    if (strncmp(s_shadow[shadow_idx], buf, 28) == 0) {
+        return;
+    }
+    memcpy(s_shadow[shadow_idx], buf, 29);
+    nes_stage_push((uint16_t)(0x20E2 + (shadow_idx * 32)), buf);
+}
+
 void ui_init(void) {
     int r, c, i, k;
     char init_str[32];
@@ -218,13 +266,14 @@ void ui_init(void) {
     s_last_cursor_row = g_tracker_state.cursor_row;
     s_last_cursor_chan = g_tracker_state.cursor_channel;
     s_last_cursor_subcol = g_tracker_state.cursor_subcol;
-    s_last_start_row = 0;
     s_last_status_bpm = (uint8_t)g_song.bpm;
     s_last_status_oct = g_tracker_state.octave;
     s_last_status_ch = g_tracker_state.cursor_channel;
     s_last_status_playing = g_tracker_state.is_playing;
-    s_old_cursor_row_to_update = 0xFF;
+    s_stage_count = 0;
+    s_shadow_start = 0xFF;
     s_scroll_refresh_idx = 0;
+    memset(s_shadow, 0, sizeof(s_shadow));
 
 #if defined(__NES__) || defined(__CC65__)
     /* Turn off PPU screen rendering before static layout setup */
@@ -266,7 +315,9 @@ void ui_init(void) {
     for (i = 0; i < 12; i++) {
         format_row_str((uint8_t)i, init_str);
         ppu_write_string(0x20E2 + (i * 32), init_str);
+        memcpy(s_shadow[i], init_str, 29);
     }
+    s_shadow_start = 0;
 
     ppu_write_string(0x2380, "--------------------------------");
     ppu_write_string(0x23A0, "A+DIR:Note B+DIR:Val START:Play");
@@ -336,179 +387,88 @@ void ui_process_playback(void) {
 
 void ui_update(void) {
     uint16_t joy = nes_read_controller();
+    uint8_t start_row, i, r;
+
     input_mapper_update(&g_tracker_state, &g_song, joy);
     ui_process_playback();
-}
 
-void ui_render(void) {
 #if defined(__NES__) || defined(__CC65__)
-    char cur_str[32];
-    uint8_t start_row, r, i;
-    uint16_t ppu_addr;
-    const char *p;
+    /* All string formatting happens here, in visible frame time. ui_render()
+     * then only has to move the staged bytes into VRAM during VBlank. */
+    s_stage_count = 0;
 
-    /* 1. Check if status bar changed */
+    /* Status bar: re-format only when something it shows changed. */
     if (g_song.bpm != s_last_status_bpm ||
         g_tracker_state.octave != s_last_status_oct ||
         g_tracker_state.cursor_channel != s_last_status_ch ||
         g_tracker_state.is_playing != s_last_status_playing) {
 
-        format_status_str(cur_str);
-        (void)PPU_STATUS;
-        PPU_ADDR = 0x20;
-        PPU_ADDR = 0x62;
-        p = cur_str;
-        while (*p) {
-            PPU_DATA = (uint8_t)(*p++);
-        }
+        char status_str[32];
+        format_status_str(status_str);
+        nes_stage_push(0x2062, status_str);
 
         s_last_status_bpm = (uint8_t)g_song.bpm;
         s_last_status_oct = g_tracker_state.octave;
         s_last_status_ch = g_tracker_state.cursor_channel;
         s_last_status_playing = g_tracker_state.is_playing;
-
-        (void)PPU_STATUS;
-        PPU_SCROLL = 0x00;
-        PPU_SCROLL = 0x00;
-        return;
     }
 
-    /* 2. Calculate visible start_row */
+    /* Visible window start for the 12-row grid. */
     start_row = g_tracker_state.cursor_row >= 6 ? g_tracker_state.cursor_row - 6 : 0;
     if (start_row > RDJ_MAX_ROWS - 12) start_row = RDJ_MAX_ROWS - 12;
 
-    /* 3. Handle scrolling if start_row changed */
-    if (start_row != s_last_start_row) {
+    if (s_shadow_start != start_row) {
+        /* The window scrolled. Refill one row per frame; s_shadow_start only
+         * commits once all 12 slots are current again, so a burst never has to
+         * push more than one row inside VBlank. */
         i = s_scroll_refresh_idx;
         r = start_row + i;
-        format_row_str(r, cur_str);
-        ppu_addr = 0x20E2 + (i * 32);
-
-        (void)PPU_STATUS;
-        PPU_ADDR = (uint8_t)(ppu_addr >> 8);
-        PPU_ADDR = (uint8_t)(ppu_addr & 0xFF);
-        p = cur_str;
-        while (*p) {
-            PPU_DATA = (uint8_t)(*p++);
-        }
+        format_row_str(r, s_shadow[i]);
+        nes_stage_push((uint16_t)(0x20E2 + (i * 32)), s_shadow[i]);
 
         s_scroll_refresh_idx++;
         if (s_scroll_refresh_idx >= 12) {
             s_scroll_refresh_idx = 0;
-            s_last_start_row = start_row;
-            s_last_cursor_row = g_tracker_state.cursor_row;
-            s_last_cursor_chan = g_tracker_state.cursor_channel;
-            s_last_cursor_subcol = g_tracker_state.cursor_subcol;
-            s_old_cursor_row_to_update = 0xFF;
+            s_shadow_start = start_row;
         }
-
-        (void)PPU_STATUS;
-        PPU_SCROLL = 0x00;
-        PPU_SCROLL = 0x00;
-        return;
-    }
-
-    /* 4. Handle cursor row move (un-highlight old cursor row) */
-    if (s_old_cursor_row_to_update != 0xFF) {
-        r = s_old_cursor_row_to_update;
-        if (r >= start_row && r < start_row + 12) {
-            i = r - start_row;
-            format_row_str(r, cur_str);
-            ppu_addr = 0x20E2 + (i * 32);
-
-            (void)PPU_STATUS;
-            PPU_ADDR = (uint8_t)(ppu_addr >> 8);
-            PPU_ADDR = (uint8_t)(ppu_addr & 0xFF);
-            p = cur_str;
-            while (*p) {
-                PPU_DATA = (uint8_t)(*p++);
-            }
-        }
-        s_old_cursor_row_to_update = 0xFF;
-
-        (void)PPU_STATUS;
-        PPU_SCROLL = 0x00;
-        PPU_SCROLL = 0x00;
-        return;
-    }
-
-    if (g_tracker_state.cursor_row != s_last_cursor_row) {
-        s_old_cursor_row_to_update = s_last_cursor_row;
-        s_last_cursor_row = g_tracker_state.cursor_row;
-        s_last_cursor_chan = g_tracker_state.cursor_channel;
-        s_last_cursor_subcol = g_tracker_state.cursor_subcol;
-
-        /* Update new cursor row immediately in this frame */
-        r = g_tracker_state.cursor_row;
-        if (r >= start_row && r < start_row + 12) {
-            i = r - start_row;
-            format_row_str(r, cur_str);
-            ppu_addr = 0x20E2 + (i * 32);
-
-            (void)PPU_STATUS;
-            PPU_ADDR = (uint8_t)(ppu_addr >> 8);
-            PPU_ADDR = (uint8_t)(ppu_addr & 0xFF);
-            p = cur_str;
-            while (*p) {
-                PPU_DATA = (uint8_t)(*p++);
-            }
-        }
-
-        (void)PPU_STATUS;
-        PPU_SCROLL = 0x00;
-        PPU_SCROLL = 0x00;
-        return;
-    }
-
-    /* 5. Handle channel/subcol/cell updates on active row */
-    if (g_tracker_state.cursor_channel != s_last_cursor_chan ||
-        g_tracker_state.cursor_subcol != s_last_cursor_subcol) {
-
-        s_last_cursor_chan = g_tracker_state.cursor_channel;
-        s_last_cursor_subcol = g_tracker_state.cursor_subcol;
-
-        r = g_tracker_state.cursor_row;
-        if (r >= start_row && r < start_row + 12) {
-            i = r - start_row;
-            format_row_str(r, cur_str);
-            ppu_addr = 0x20E2 + (i * 32);
-
-            (void)PPU_STATUS;
-            PPU_ADDR = (uint8_t)(ppu_addr >> 8);
-            PPU_ADDR = (uint8_t)(ppu_addr & 0xFF);
-            p = cur_str;
-            while (*p) {
-                PPU_DATA = (uint8_t)(*p++);
-            }
-        }
-
-        (void)PPU_STATUS;
-        PPU_SCROLL = 0x00;
-        PPU_SCROLL = 0x00;
-        return;
-    }
-
-    /* Always update active row in case note/instrument was edited */
-    r = g_tracker_state.cursor_row;
-    if (r >= start_row && r < start_row + 12) {
-        i = r - start_row;
-        format_row_str(r, cur_str);
-        ppu_addr = 0x20E2 + (i * 32);
-
-        (void)PPU_STATUS;
-        PPU_ADDR = (uint8_t)(ppu_addr >> 8);
-        PPU_ADDR = (uint8_t)(ppu_addr & 0xFF);
-        p = cur_str;
-        while (*p) {
-            PPU_DATA = (uint8_t)(*p++);
+    } else {
+        /* Steady state: push only the rows whose text actually changed (the
+         * cursor moving or a cell being edited). */
+        for (i = 0; i < 12; i++) {
+            nes_stage_row_if_changed(i, (uint8_t)(start_row + i));
         }
     }
 
+    s_last_cursor_row = g_tracker_state.cursor_row;
+    s_last_cursor_chan = g_tracker_state.cursor_channel;
+    s_last_cursor_subcol = g_tracker_state.cursor_subcol;
+#endif
+}
+
+void ui_render(void) {
+#if defined(__NES__) || defined(__CC65__)
+    uint8_t w, i;
+
+    /* Pure VRAM byte transfer: no formatting or branchy layout work here, so
+     * the whole burst finishes well inside the ~2270-cycle VBlank window. */
+    for (w = 0; w < s_stage_count; w++) {
+        nes_vram_write_t *s = &s_stage[w];
+        (void)PPU_STATUS;
+        PPU_ADDR = (uint8_t)(s->addr >> 8);
+        PPU_ADDR = (uint8_t)(s->addr & 0xFF);
+        for (i = 0; i < s->len; i++) {
+            PPU_DATA = (uint8_t)s->buf[i];
+        }
+    }
+    s_stage_count = 0;
+
+    /* Reset the scroll latch last: never write PPU_ADDR after this. */
     (void)PPU_STATUS;
     PPU_SCROLL = 0x00;
     PPU_SCROLL = 0x00;
 #endif
 }
+
 
 input_tracker_state_t *ui_get_tracker_state(void) {
     return &g_tracker_state;
