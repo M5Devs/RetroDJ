@@ -155,11 +155,19 @@ void ui_init(void) {
     s_last_status_playing = g_tracker_state.is_playing;
 
 #if defined(__PORT_sm83) || defined(__TARGET_gb) || defined(GBDK)
-    /* Initialize GBDK Font */
+    /* Initialize GBDK Font. font_min only carries the digits and letters, so
+     * every punctuation glyph in the tracker grid (the "|" column separators,
+     * "-" note padding, "[", "]") would load as a blank tile. Use font_ibm,
+     * which covers the full printable ASCII range. */
     font_init();
     font_color(3, 0);
-    font_t min_font = font_load(font_min);
-    font_set(min_font);
+    font_t ui_font = font_load(font_ibm);
+    font_set(ui_font);
+
+    /* The GBDK console wraps to the next line at column 20 and scrolls the
+     * whole background up when it prints past the last row. The tracker writes
+     * rows out of order, so disable scrolling to keep every gotoxy() put. */
+    mode(M_NO_SCROLL);
 
     /* Enable Display & Background */
     SHOW_BKG;
@@ -179,10 +187,11 @@ void ui_init(void) {
         set_bkg_palette(0, 1, cgb_palette);
     }
 
-    /* Clear screen and draw initial layout */
+    /* Clear screen and draw initial layout. The title must fit the 20-column
+     * console width, otherwise the wrap spills onto the status row. */
     cls();
     gotoxy(0, 0);
-    printf("--- RetroDJ GameBoy ---");
+    printf("- RetroDJ GameBoy -");
 
     char init_str[24];
     format_status_str(init_str);

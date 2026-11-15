@@ -6,7 +6,9 @@ CUR_DIR="$(pwd)"
 
 echo "Capturing NES screenshot using fceux under Xvfb..."
 cat << LUAEOF > /tmp/nes_capture.lua
-for i = 1, 120 do
+-- 400 frames (~7s) so FCEUX's startup on-screen message has faded; at 120
+-- frames the OSD overlay is still visible and lands in the captured image.
+for i = 1, 400 do
     emu.frameadvance()
 end
 local f = io.open("${CUR_DIR}/screenshots/nes_screenshot.ppm", "w")
