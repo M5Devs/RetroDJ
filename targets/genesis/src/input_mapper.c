@@ -3,10 +3,51 @@
 
 #include "input_mapper.h"
 
+/* The YM2612 entry points are only a fallback for songs with no bound driver
+ * (see audition_note_on/off below). */
 #if defined(RDJ_GENESIS_HARDWARE) || defined(SGDK_GCC) || defined(__m68k__)
 extern void ym2612_rdj_note_on(uint8_t channel, uint8_t note, uint8_t instrument);
 extern void ym2612_rdj_note_off(uint8_t channel);
 #endif
+
+/* Audition through whichever sound driver the song is bound to, so the same
+ * input code previews notes on the YM2612, the NES 2A03 and the Game Boy APU
+ * alike. Songs with no bound driver (host-side tests) fall back to the YM2612. */
+static void audition_note_on(rdj_song_t *song, uint8_t ch, uint8_t note,
+                             uint8_t inst, uint8_t vol) {
+    if (song->driver && song->driver->note_on) {
+        song->driver->note_on(ch, note, inst, vol);
+        return;
+    }
+#if defined(RDJ_GENESIS_HARDWARE) || defined(SGDK_GCC) || defined(__m68k__)
+    (void)vol;
+    ym2612_rdj_note_on(ch, note, inst);
+#else
+    (void)ch; (void)note; (void)inst; (void)vol;
+#endif
+}
+
+static void audition_note_off(rdj_song_t *song, uint8_t ch) {
+    if (song->driver && song->driver->note_off) {
+        song->driver->note_off(ch);
+        return;
+    }
+#if defined(RDJ_GENESIS_HARDWARE) || defined(SGDK_GCC) || defined(__m68k__)
+    ym2612_rdj_note_off(ch);
+#else
+    (void)ch;
+#endif
+}
+
+/* Pitch to audition: the cell's note, or the current octave's root note when
+ * the cell is empty, so a bare audition still sounds. */
+static uint8_t audition_pitch(const input_tracker_state_t *state,
+                              const rdj_row_t *cell) {
+    if (cell->note != RDJ_NOTE_EMPTY && cell->note != RDJ_NOTE_OFF) {
+        return cell->note;
+    }
+    return (uint8_t)(state->octave * 12 + 12);
+}
 
 void input_mapper_init(input_tracker_state_t *state) {
     if (!state) return;
@@ -29,10 +70,10 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
     pressed = joy_state & ~state->last_joy;
     btn_a = (joy_state & BUTTON_A) != 0;
     btn_b = (joy_state & BUTTON_B) != 0;
+    cell = &song->patterns[0].rows[state->cursor_row][state->cursor_channel];
 
     /* BUTTON_B + BUTTON_A combo: Clear current cell */
     if ((btn_b && (pressed & BUTTON_A)) || (btn_a && (pressed & BUTTON_B))) {
-        cell = &song->patterns[0].rows[state->cursor_row][state->cursor_channel];
         cell->note = RDJ_NOTE_EMPTY;
         cell->instrument = 0;
         cell->volume = 0;
@@ -47,25 +88,14 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
         state->is_playing = !state->is_playing;
     }
 
-    /* BUTTON_C: Play audition note at current cursor */
-    if (pressed & BUTTON_C) {
-#if defined(RDJ_GENESIS_HARDWARE) || defined(SGDK_GCC) || defined(__m68k__)
-        cell = &song->patterns[0].rows[state->cursor_row][state->cursor_channel];
-        uint8_t audition_note = (cell->note != RDJ_NOTE_EMPTY && cell->note != RDJ_NOTE_OFF) ? cell->note : (state->octave * 12 + 12);
-        ym2612_rdj_note_on(state->cursor_channel, audition_note, cell->instrument);
-#endif
-    } else if ((state->last_joy & BUTTON_C) && !(joy_state & BUTTON_C)) {
-#if defined(RDJ_GENESIS_HARDWARE) || defined(SGDK_GCC) || defined(__m68k__)
-        ym2612_rdj_note_off(state->cursor_channel);
-#endif
-    }
-
-    /* Directional handling based on modifiers */
+    /* Note editing: BUTTON_A + Direction transposes the cell, auditioning the
+     * result immediately (the LSDj workflow). A and B are handled as distinct
+     * branches so the A path stays reachable on pads that have no C button. */
     if (btn_a && !btn_b) {
+        uint8_t before = cell->note;
+
         /* BUTTON_A + UP/DOWN: Transpose note by +/- 1 semitone */
         /* BUTTON_A + LEFT/RIGHT: Transpose note by +/- 1 octave (12 semitones) */
-        cell = &song->patterns[0].rows[state->cursor_row][state->cursor_channel];
-
         if (pressed & BUTTON_UP) {
             if (cell->note == RDJ_NOTE_EMPTY) cell->note = state->octave * 12 + 12;
             else if (cell->note < 127) cell->note++;
@@ -84,11 +114,20 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
             else if (cell->note > 12) cell->note -= 12;
             else cell->note = 1;
         }
+
+        if (cell->note != before) {
+            /* Note changed: audition it. */
+            audition_note_on(song, state->cursor_channel, cell->note,
+                             cell->instrument, 128);
+        } else if ((pressed & BUTTON_A) && state->cursor_subcol == RDJ_SUBCOL_NOTE) {
+            /* Plain A tap on the note column: audition without editing. */
+            audition_note_on(song, state->cursor_channel, audition_pitch(state, cell),
+                             cell->instrument, 128);
+        }
     } else if (btn_b && !btn_a) {
         /* BUTTON_B + UP/DOWN: Increment/decrement current value by 1 */
         /* BUTTON_B + LEFT/RIGHT: Increment/decrement current value by 16 (0x10) */
         int delta = 0;
-        cell = &song->patterns[0].rows[state->cursor_row][state->cursor_channel];
 
         if (pressed & BUTTON_UP) delta = 1;
         if (pressed & BUTTON_DOWN) delta = -1;
@@ -104,6 +143,8 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
                     if (new_note < 1) new_note = 1;
                     if (new_note > 127) new_note = 127;
                     cell->note = (uint8_t)new_note;
+                    audition_note_on(song, state->cursor_channel, cell->note,
+                                     cell->instrument, 128);
                     break;
                 }
                 case RDJ_SUBCOL_INST: {
@@ -128,6 +169,10 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
                     break;
                 }
             }
+        } else if ((pressed & BUTTON_B) && state->cursor_subcol == RDJ_SUBCOL_NOTE) {
+            /* Plain B tap on the note column: audition (pads without a C button). */
+            audition_note_on(song, state->cursor_channel, audition_pitch(state, cell),
+                             cell->instrument, 128);
         }
     } else if (!btn_a && !btn_b) {
         /* Normal Cursor Navigation */
@@ -155,6 +200,14 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
                 state->cursor_subcol = 0;
             }
         }
+    }
+
+    /* BUTTON_C (Genesis only): audition while held. */
+    if (pressed & BUTTON_C) {
+        audition_note_on(song, state->cursor_channel, audition_pitch(state, cell),
+                         cell->instrument, 128);
+    } else if ((state->last_joy & BUTTON_C) && !(joy_state & BUTTON_C)) {
+        audition_note_off(song, state->cursor_channel);
     }
 
     state->last_joy = joy_state;

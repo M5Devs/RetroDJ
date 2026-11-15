@@ -14,10 +14,12 @@
 #define PPU_SCROLL (*((volatile uint8_t*)0x2005))
 #define PPU_ADDR   (*((volatile uint8_t*)0x2006))
 #define PPU_DATA   (*((volatile uint8_t*)0x2007))
-#define JOYPAD1    (*((volatile uint8_t*)0x4016))
 
 static rdj_song_t g_song;
 static input_tracker_state_t g_tracker_state;
+
+/* Scratch byte shared with the inline-assembly controller shift loop. */
+static uint8_t s_joy_bit = 0;
 
 static uint8_t s_tick_counter = 0;
 static uint8_t s_current_play_row = 0;
@@ -52,19 +54,33 @@ void nes_vblank_wait(void) {
 uint16_t nes_read_controller(void) {
     uint16_t buttons = 0;
 #if defined(__NES__) || defined(__CC65__)
-    /* Strobe controller 1 */
-    JOYPAD1 = 0x01;
-    JOYPAD1 = 0x00;
+    uint8_t raw = 0;
+    uint8_t i;
 
-    /* NES Controller order: A, B, SELECT, START, UP, DOWN, LEFT, RIGHT */
-    if (JOYPAD1 & 1) buttons |= BUTTON_A;     /* Bit 0: A */
-    if (JOYPAD1 & 1) buttons |= BUTTON_B;     /* Bit 1: B */
-    if (JOYPAD1 & 1) { /* SELECT bit - unmapped */ }
-    if (JOYPAD1 & 1) buttons |= BUTTON_START; /* Bit 3: START */
-    if (JOYPAD1 & 1) buttons |= BUTTON_UP;    /* Bit 4: UP */
-    if (JOYPAD1 & 1) buttons |= BUTTON_DOWN;  /* Bit 5: DOWN */
-    if (JOYPAD1 & 1) buttons |= BUTTON_LEFT;  /* Bit 6: LEFT */
-    if (JOYPAD1 & 1) buttons |= BUTTON_RIGHT; /* Bit 7: RIGHT */
+    /* cc65 folds a C-level read of $4016 to zero when it follows the strobe
+     * write, so the shift register has to be clocked in assembly. Read order
+     * is A, B, SELECT, START, UP, DOWN, LEFT, RIGHT. */
+    __asm__("lda #$01");
+    __asm__("sta $4016");
+    __asm__("lda #$00");
+    __asm__("sta $4016");
+
+    /* The pad shifts out A first, so shift each new bit in at the top and the
+     * first button read ends up in bit 0 after all eight reads. */
+    for (i = 0; i < 8; i++) {
+        __asm__("lda $4016");
+        __asm__("and #$01");
+        __asm__("sta %v", s_joy_bit);
+        raw = (uint8_t)((raw >> 1) | ((s_joy_bit & 1) << 7));
+    }
+
+    if (raw & 0x01) buttons |= BUTTON_A;      /* Bit 0: A */
+    if (raw & 0x02) buttons |= BUTTON_B;      /* Bit 1: B */
+    if (raw & 0x08) buttons |= BUTTON_START;  /* Bit 3: START */
+    if (raw & 0x10) buttons |= BUTTON_UP;     /* Bit 4: UP */
+    if (raw & 0x20) buttons |= BUTTON_DOWN;   /* Bit 5: DOWN */
+    if (raw & 0x40) buttons |= BUTTON_LEFT;   /* Bit 6: LEFT */
+    if (raw & 0x80) buttons |= BUTTON_RIGHT;  /* Bit 7: RIGHT */
 #endif
     return buttons;
 }
@@ -189,6 +205,9 @@ void ui_init(void) {
     }
     g_song.patterns[0].length = 32;
     g_song.patterns[0].speed = 6;
+
+    /* Audition/edit notes through the 2A03 APU driver. */
+    g_song.driver = &nes_2a03_driver;
 
     input_mapper_init(&g_tracker_state);
 

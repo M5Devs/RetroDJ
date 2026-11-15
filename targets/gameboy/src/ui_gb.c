@@ -136,6 +136,9 @@ void ui_init(void) {
     g_song.patterns[0].length = 32;
     g_song.patterns[0].speed = 6;
 
+    /* Audition/edit notes through the Game Boy APU driver. */
+    g_song.driver = &gb_sound_driver;
+
     input_mapper_init(&g_tracker_state);
 
     s_tick_counter = 0;

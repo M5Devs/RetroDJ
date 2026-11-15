@@ -76,6 +76,9 @@ void ui_init(void) {
     g_song.patterns[0].length = 64;
     g_song.patterns[0].speed = 6;
 
+    /* Audition/edit notes through the YM2612 driver. */
+    g_song.driver = &ym2612_driver;
+
     input_mapper_init(&g_tracker_state);
 
     s_tick_counter = 0;
