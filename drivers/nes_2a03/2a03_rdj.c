@@ -196,15 +196,27 @@ void apu_rdj_noise_off(void) {
     apu_rdj_write(APU_NOI_VOL, 0x30);
 }
 
+/* Driver volume is 0..128 (see input_mapper's audition), but the 2A03 volume
+ * nibble is 0..15. A bare `vol >> 3` gives 16 for vol == 128, which masks to 0
+ * and silences the audition, so clamp the top of the range. */
+static uint8_t apu_map_volume(uint8_t vol) {
+    uint8_t v = (uint8_t)(vol >> 3);
+    if (v > 15) {
+        v = 15;
+    }
+    return v;
+}
+
 /* Driver interface wrapper functions matching rdj_driver_t function pointers */
 static void apu_wrapper_note_on(uint8_t ch, uint8_t note, uint8_t inst, uint8_t vol) {
+    uint8_t v = apu_map_volume(vol);
     (void)inst;
     if (ch == 0 || ch == 1) {
-        apu_rdj_square_note_on(ch, note, 2 /* 50% duty */, vol >> 3 /* 0-15 volume range */);
+        apu_rdj_square_note_on(ch, note, 2 /* 50% duty */, v);
     } else if (ch == 2) {
         apu_rdj_triangle_note_on(note);
     } else if (ch == 3) {
-        apu_rdj_noise_on(note & 0x0F, vol >> 3);
+        apu_rdj_noise_on(note & 0x0F, v);
     }
 }
 

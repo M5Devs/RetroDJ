@@ -445,29 +445,62 @@ void ui_update(void) {
 #endif
 }
 
+#if defined(__NES__) || defined(__CC65__)
+/* VBlank is only ~2270 cycles, so the transfer has to be a tight assembly
+ * loop: the cc65 byte loop costs 100+ cycles per byte and would overrun the
+ * window, forcing the burst into visible time where a $2007 write makes the
+ * PPU advance its v register by 32 instead of 1 (the left-column corruption).
+ * This loop runs at ~16 cycles per byte, so even three 28-byte rows land in
+ * well under the window and rendering never has to be blanked.
+ *
+ * __fastcall__ passes the struct pointer in AX. Only A, X and Y are clobbered;
+ * ptr1/tmp1/tmp2 are cc65 scratch zero-page registers. */
+static void __fastcall__ ppu_stage_write(const nes_vram_write_t *s) {
+    (void)s;
+    __asm__("ldy #$00");
+    __asm__("sta ptr1");
+    __asm__("stx ptr1+1");
+    __asm__("lda (ptr1),y");
+    __asm__("sta tmp1");       /* target address low byte */
+    __asm__("iny");
+    __asm__("lda (ptr1),y");
+    __asm__("sta tmp2");       /* target address high byte */
+    __asm__("iny");
+    __asm__("lda (ptr1),y");   /* length */
+    __asm__("tax");
+    __asm__("beq @done");
+    __asm__("clc");            /* buf starts 3 bytes into the struct */
+    __asm__("lda ptr1");
+    __asm__("adc #$03");
+    __asm__("sta ptr1");
+    __asm__("bcc @noadj");
+    __asm__("inc ptr1+1");
+    __asm__("@noadj:");
+    __asm__("ldy #$00");
+    __asm__("bit $2002");      /* reset the PPU address latch */
+    __asm__("lda tmp2");
+    __asm__("sta $2006");
+    __asm__("lda tmp1");
+    __asm__("sta $2006");
+    __asm__("@loop:");
+    __asm__("lda (ptr1),y");
+    __asm__("sta $2007");
+    __asm__("iny");
+    __asm__("dex");
+    __asm__("bne @loop");
+    __asm__("@done:");
+}
+#endif
+
 void ui_render(void) {
 #if defined(__NES__) || defined(__CC65__)
     uint8_t stages = s_stage_count;
-    uint8_t w, i;
+    uint8_t w;
 
-    /* The cc65 byte loop is slow enough that a multi-row burst can spill past
-     * the ~2270-cycle VBlank window. While rendering is on, a $2007 write that
-     * lands in visible time makes the PPU advance its internal v register by 32
-     * instead of 1, so the tail of the burst lands in the wrong nametable cells
-     * (the left-column corruption). Blank the screen for the duration of the
-     * transfer and restore it once the scroll latch has been reset. */
-    if (stages) {
-        PPU_MASK = 0x00;
-    }
-
+    /* Rendering stays enabled: the fast copier keeps the whole burst inside
+     * VBlank, so the screen is never blanked and cannot flicker. */
     for (w = 0; w < stages; w++) {
-        nes_vram_write_t *s = &s_stage[w];
-        __asm__("bit $2002");
-        PPU_ADDR = (uint8_t)(s->addr >> 8);
-        PPU_ADDR = (uint8_t)(s->addr & 0xFF);
-        for (i = 0; i < s->len; i++) {
-            PPU_DATA = (uint8_t)s->buf[i];
-        }
+        ppu_stage_write(&s_stage[w]);
     }
     s_stage_count = 0;
 
@@ -475,10 +508,6 @@ void ui_render(void) {
     __asm__("bit $2002");
     PPU_SCROLL = 0x00;
     PPU_SCROLL = 0x00;
-
-    if (stages) {
-        PPU_MASK = 0x1E;
-    }
 #endif
 }
 

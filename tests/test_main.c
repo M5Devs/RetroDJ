@@ -12,6 +12,26 @@
 
 extern void vgm_open(const char *filename);
 
+/* Recording backend: captures APU writes so the NES volume mapping can be
+ * asserted without a hardware backend. */
+static uint8_t test_apu[0x20];
+static void rec_init(void) {
+    for (int i = 0; i < 0x20; i++) test_apu[i] = 0;
+}
+static void rec_shutdown(void) {}
+static void rec_write_ym2612(uint8_t port, uint8_t reg, uint8_t val) {
+    (void)port; (void)reg; (void)val;
+}
+static void rec_write_apu(uint16_t addr, uint8_t val) {
+    if (addr >= 0x4000 && addr <= 0x4015) test_apu[addr - 0x4000] = val;
+}
+static void rec_wait_samples(uint16_t samples) { (void)samples; }
+static void rec_wait_frame(void) {}
+static rdj_backend_t backend_recording = {
+    "Recording Backend", rec_init, rec_shutdown,
+    rec_write_ym2612, rec_write_apu, rec_wait_samples, rec_wait_frame
+};
+
 static void test_input_mapper(void) {
     printf("Testing Tracker UI & Input Mapper...\n");
     ui_init();
@@ -175,6 +195,21 @@ int main(void) {
     ym2612_driver.write_reg(0x002B, 0x00);
     ym2612_driver.note_on(0, 60, 0, 128);
     ym2612_driver.note_off(0);
+
+    printf("Testing NES 2A03 volume mapping...\n");
+    /* The audition path passes vol == 128, the top of the 0..128 driver range.
+     * The 2A03 volume nibble is 0..15, so 128 must map to 15 rather than wrap
+     * to 0 (which silenced every audition). */
+    rdj_set_backend(&backend_recording);
+    nes_2a03_driver.init(1789773);
+    nes_2a03_driver.note_on(0, 60, 0, 128);
+    assert(test_apu[0x00] == 0xBF); /* duty 2, constant volume, volume 15 */
+    nes_2a03_driver.note_on(0, 60, 0, 64);
+    assert((test_apu[0x00] & 0x0F) == 8);
+    nes_2a03_driver.note_on(0, 60, 0, 0);
+    assert((test_apu[0x00] & 0x0F) == 0);
+    nes_2a03_driver.note_off(0);
+    rdj_set_backend(&backend_null);
 
     printf("Testing NES 2A03 Driver with VGM Backend...\n");
     vgm_open("test_output.vgm");
