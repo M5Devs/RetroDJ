@@ -19,14 +19,18 @@ INCS := -I. \
 CFLAGS := -mz80 --std-c99 -D__SMS__ --peep-file smslib/peep-rules.txt $(INCS)
 ASFLAGS := -g
 
+OUT_DIR := out
+
 # `make GG=1` builds the Game Gear variant: it defines TARGET_GG, which makes
 # SMSlib read the pad's START key and emit the GG region code in the ROM header.
+# The two variants share object files, so switch between them with `make clean`.
 ifeq ($(GG),1)
 CFLAGS += -DTARGET_GG
+TARGET  := $(OUT_DIR)/rom.gg
+else
+TARGET  := $(OUT_DIR)/rom.sms
 endif
 
-OUT_DIR := out
-TARGET  := $(OUT_DIR)/rom.sms
 IHX     := $(OUT_DIR)/rom.ihx
 
 # Project sources.
@@ -80,7 +84,7 @@ $(TARGET): $(IHX)
 	$(MAKEBIN) -p $(IHX) $@
 
 clean:
-	rm -f $(TARGET) $(IHX)
+	rm -f $(OUT_DIR)/rom.sms $(OUT_DIR)/rom.gg $(IHX)
 	rm -f $(CRT0_REL) $(C_RELS)
 	rm -f src/*.rel src/*.lst src/*.asm src/*.sym
 	rm -f smslib/*.rel smslib/*.lst smslib/*.asm smslib/*.sym

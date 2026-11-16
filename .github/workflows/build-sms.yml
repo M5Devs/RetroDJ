@@ -22,7 +22,7 @@ on:
 jobs:
 
   build-sms:
-    name: SMS ROM (SDCC)
+    name: SMS / Game Gear ROM (SDCC)
     runs-on: ubuntu-latest
 
     steps:
@@ -34,23 +34,39 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y sdcc
 
-      - name: Build SMS ROM
+      # The two variants share object files, so each is built from a clean tree
+      # and its ROM is staged before the next build cleans the output directory.
+      - name: Build Master System ROM
         run: |
           make -C targets/sms/
+          mkdir -p dist
+          cp targets/sms/out/rom.sms dist/rom.sms
 
-      - name: Verify SMS ROM Output
+      - name: Build Game Gear ROM
         run: |
-          if [ -f targets/sms/out/rom.sms ]; then
-            echo "Successfully generated rom.sms!"
-            ls -la targets/sms/out/rom.sms
-          else
-            echo "Error: targets/sms/out/rom.sms not found!"
-            ls -la targets/sms/out/ || true
-            false
-          fi
+          make -C targets/sms/ clean
+          make -C targets/sms/ GG=1
+          mkdir -p dist
+          cp targets/sms/out/rom.gg dist/rom.gg
 
-      - name: Upload SMS ROM
+      - name: Verify ROM Output
+        run: |
+          ok=1
+          for rom in dist/rom.sms dist/rom.gg; do
+            if [ -f "$rom" ]; then
+              echo "Successfully generated $rom!"
+              ls -la "$rom"
+            else
+              echo "Error: $rom not found!"
+              ok=0
+            fi
+          done
+          [ "$ok" = 1 ]
+
+      - name: Upload ROMs
         uses: actions/upload-artifact@v4
         with:
           name: RDJ-sms-rom
-          path: targets/sms/out/rom.sms
+          path: |
+            dist/rom.sms
+            dist/rom.gg
