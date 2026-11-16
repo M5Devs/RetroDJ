@@ -105,7 +105,7 @@ uint16_t nes_read_controller(void) {
 
 static void ppu_write_string(uint16_t ppu_addr, const char *str) {
 #if defined(__NES__) || defined(__CC65__)
-    (void)PPU_STATUS; /* Reset PPU address latch */
+    __asm__("bit $2002"); /* Reset PPU address latch */
     PPU_ADDR = (uint8_t)(ppu_addr >> 8);
     PPU_ADDR = (uint8_t)(ppu_addr & 0xFF);
     while (*str) {
@@ -280,7 +280,7 @@ void ui_init(void) {
     PPU_MASK = 0x00;
 
     /* Latch address $3F00 */
-    (void)PPU_STATUS;
+    __asm__("bit $2002");
     PPU_ADDR = 0x3F;
     PPU_ADDR = 0x00;
 
@@ -296,7 +296,7 @@ void ui_init(void) {
     }
 
     /* Clear Nametable 0 ($2000-$23BF) to spaces (0x20) */
-    (void)PPU_STATUS;
+    __asm__("bit $2002");
     PPU_ADDR = 0x20;
     PPU_ADDR = 0x00;
     for (k = 0; k < 960; k++) {
@@ -323,7 +323,7 @@ void ui_init(void) {
     ppu_write_string(0x23A0, "A+DIR:Note B+DIR:Val START:Play");
 
     /* Clear Attribute Table ($23C0-$23FF) to $00 (palette 0) */
-    (void)PPU_STATUS;
+    __asm__("bit $2002");
     PPU_ADDR = 0x23;
     PPU_ADDR = 0xC0;
     for (k = 0; k < 64; k++) {
@@ -331,7 +331,7 @@ void ui_init(void) {
     }
 
     /* Reset PPU scroll latch cleanly */
-    (void)PPU_STATUS;
+    __asm__("bit $2002");
     PPU_SCROLL = 0x00;
     PPU_SCROLL = 0x00;
 
@@ -447,13 +447,22 @@ void ui_update(void) {
 
 void ui_render(void) {
 #if defined(__NES__) || defined(__CC65__)
+    uint8_t stages = s_stage_count;
     uint8_t w, i;
 
-    /* Pure VRAM byte transfer: no formatting or branchy layout work here, so
-     * the whole burst finishes well inside the ~2270-cycle VBlank window. */
-    for (w = 0; w < s_stage_count; w++) {
+    /* The cc65 byte loop is slow enough that a multi-row burst can spill past
+     * the ~2270-cycle VBlank window. While rendering is on, a $2007 write that
+     * lands in visible time makes the PPU advance its internal v register by 32
+     * instead of 1, so the tail of the burst lands in the wrong nametable cells
+     * (the left-column corruption). Blank the screen for the duration of the
+     * transfer and restore it once the scroll latch has been reset. */
+    if (stages) {
+        PPU_MASK = 0x00;
+    }
+
+    for (w = 0; w < stages; w++) {
         nes_vram_write_t *s = &s_stage[w];
-        (void)PPU_STATUS;
+        __asm__("bit $2002");
         PPU_ADDR = (uint8_t)(s->addr >> 8);
         PPU_ADDR = (uint8_t)(s->addr & 0xFF);
         for (i = 0; i < s->len; i++) {
@@ -463,9 +472,13 @@ void ui_render(void) {
     s_stage_count = 0;
 
     /* Reset the scroll latch last: never write PPU_ADDR after this. */
-    (void)PPU_STATUS;
+    __asm__("bit $2002");
     PPU_SCROLL = 0x00;
     PPU_SCROLL = 0x00;
+
+    if (stages) {
+        PPU_MASK = 0x1E;
+    }
 #endif
 }
 
