@@ -1,0 +1,56 @@
+name: SMS / Game Gear Build
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'targets/sms/**'
+      - 'backends/**'
+      - 'core/**'
+      - 'drivers/sn76489/**'
+      - '.github/workflows/build-sms.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'targets/sms/**'
+      - 'backends/**'
+      - 'core/**'
+      - 'drivers/sn76489/**'
+      - '.github/workflows/build-sms.yml'
+  workflow_dispatch:
+
+jobs:
+
+  build-sms:
+    name: SMS ROM (SDCC)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SDCC
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sdcc
+
+      - name: Build SMS ROM
+        run: |
+          make -C targets/sms/
+
+      - name: Verify SMS ROM Output
+        run: |
+          if [ -f targets/sms/out/rom.sms ]; then
+            echo "Successfully generated rom.sms!"
+            ls -la targets/sms/out/rom.sms
+          else
+            echo "Error: targets/sms/out/rom.sms not found!"
+            ls -la targets/sms/out/ || true
+            false
+          fi
+
+      - name: Upload SMS ROM
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDJ-sms-rom
+          path: targets/sms/out/rom.sms

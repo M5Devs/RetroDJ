@@ -40,6 +40,11 @@ static void nes_hw_write_apu(uint16_t addr, uint8_t val) {
 #endif
 }
 
+static void nes_hw_write_psg(uint8_t val) {
+    /* No SN76489 on the NES; kept so the backend table stays uniform. */
+    (void)val;
+}
+
 static void nes_hw_init(void) {
     /* Enable APU channels (Square 1, Square 2, Triangle, Noise) via $4015 */
     nes_hw_write_apu(0x4015, 0x0F);
@@ -73,6 +78,7 @@ rdj_backend_t backend_nes_hw = {
     nes_hw_shutdown,
     nes_hw_write_ym2612,
     nes_hw_write_apu,
+    nes_hw_write_psg,
     nes_hw_wait_samples,
     nes_hw_wait_frame
 };

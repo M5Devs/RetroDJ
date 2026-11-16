@@ -2,6 +2,7 @@
 *.o
 *.s
 !targets/nes/src/crt0.s
+!targets/sms/crt0_sms.s
 out/
 targets/gameboy/out/
 test_runner
@@ -14,6 +15,9 @@ test_output.vgm
 *.noi
 *.map
 *.asm
+
+# SDCC intermediate build artifacts
+*.rel
 
 # SGDK copied sources
 targets/genesis/src/core/

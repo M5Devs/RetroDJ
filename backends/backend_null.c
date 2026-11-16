@@ -64,6 +64,14 @@ static void null_write_apu(uint16_t addr, uint8_t val) {
 #endif
 }
 
+static void null_write_psg(uint8_t val) {
+#if !defined(SGDK_GCC) && !defined(RDJ_GENESIS_HARDWARE)
+    printf("[SN76489] $%02X\n", val);
+#else
+    (void)val;
+#endif
+}
+
 static void null_wait_samples(uint16_t samples) {
 #if !defined(SGDK_GCC) && !defined(RDJ_GENESIS_HARDWARE)
     printf("[NULL] Wait %u samples\n", samples);
@@ -84,6 +92,7 @@ rdj_backend_t backend_null = {
     .shutdown = null_shutdown,
     .write_ym2612 = null_write_ym2612,
     .write_apu = null_write_apu,
+    .write_psg = null_write_psg,
     .wait_samples = null_wait_samples,
     .wait_frame = null_wait_frame
 };

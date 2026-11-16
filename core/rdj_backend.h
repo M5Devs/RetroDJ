@@ -34,6 +34,8 @@ typedef struct rdj_backend_t {
     void (*shutdown)(void);
     void (*write_ym2612)(uint8_t port, uint8_t reg, uint8_t val);
     void (*write_apu)(uint16_t addr, uint8_t val);
+    /* SN76489 / Sega PSG: a single byte written to the PSG data port. */
+    void (*write_psg)(uint8_t val);
     void (*wait_samples)(uint16_t samples);
     void (*wait_frame)(void);
 } rdj_backend_t;
@@ -44,6 +46,8 @@ extern rdj_backend_t backend_vgm;
 extern rdj_backend_t backend_serial;
 extern rdj_backend_t backend_genesis_hw;
 extern rdj_backend_t backend_nes_hw;
+extern rdj_backend_t backend_gb_hw;
+extern rdj_backend_t backend_sms_hw;
 
 void rdj_set_backend(rdj_backend_t *backend);
 

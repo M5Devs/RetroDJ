@@ -63,6 +63,14 @@ static void serial_write_apu(uint16_t addr, uint8_t val) {
 #endif
 }
 
+static void serial_write_psg(uint8_t val) {
+#if !defined(SGDK_GCC) && !defined(RDJ_GENESIS_HARDWARE)
+    printf("[SERIAL TX] SN76489 Val %02X\n", val);
+#else
+    (void)val;
+#endif
+}
+
 static void serial_wait_samples(uint16_t samples) {
 #if !defined(SGDK_GCC) && !defined(RDJ_GENESIS_HARDWARE)
     printf("[SERIAL TX] Wait %u samples\n", samples);
@@ -83,6 +91,7 @@ rdj_backend_t backend_serial = {
     .shutdown = serial_shutdown,
     .write_ym2612 = serial_write_ym2612,
     .write_apu = serial_write_apu,
+    .write_psg = serial_write_psg,
     .wait_samples = serial_wait_samples,
     .wait_frame = serial_wait_frame
 };

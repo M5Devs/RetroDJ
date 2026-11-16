@@ -30,6 +30,13 @@
     #define RDJ_MAX_CHANNELS 4
     #define RDJ_MAX_PATTERNS 2
     #define RDJ_MAX_ROWS     32
+#elif defined(__SMS__) || defined(__SDCC_z80)
+    /* Sega Master System / Game Gear: 4 PSG channels. The Z80 has 8 KB of work
+     * RAM and the VDP tile map lives in VRAM, so the song has to stay small
+     * enough to share the RAM with the tracker UI state. */
+    #define RDJ_MAX_CHANNELS 4
+    #define RDJ_MAX_PATTERNS 2
+    #define RDJ_MAX_ROWS     32
 #elif defined(RDJ_GENESIS_HARDWARE) || defined(SGDK_GCC) || defined(__m68k__)
     #define RDJ_MAX_CHANNELS 6
     #define RDJ_MAX_PATTERNS 16
@@ -76,6 +83,13 @@ typedef struct {
  * runtime. Without this, the 16-bit address space silently wraps and the
  * song corrupts VRAM/IO registers (garbage tiles, dead display). */
 typedef char rdj_gb_song_fits_wram[(sizeof(rdj_song_t) <= 4096) ? 1 : -1];
+#endif
+
+#if defined(__SMS__) || defined(__SDCC_z80)
+/* The Sega Master System's Z80 has 8 KB of work RAM. The song shares it with
+ * the tracker state and the runtime, so fail the build rather than silently
+ * corrupt the UI if the pattern data grows. */
+typedef char rdj_sms_song_fits_ram[(sizeof(rdj_song_t) <= 2048) ? 1 : -1];
 #endif
 
 #endif

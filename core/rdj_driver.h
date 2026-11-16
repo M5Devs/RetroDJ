@@ -45,5 +45,6 @@ typedef struct rdj_driver_t {
 extern rdj_driver_t ym2612_driver;
 extern rdj_driver_t nes_2a03_driver;
 extern rdj_driver_t gb_sound_driver;
+extern rdj_driver_t sn76489_driver;
 
 #endif

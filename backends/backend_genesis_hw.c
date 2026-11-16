@@ -102,6 +102,16 @@ static void genesis_hw_write_apu(uint16_t addr, uint8_t val) {
     (void)val;
 }
 
+/* The Genesis carries the same SN76489 PSG as the Master System, but it is
+ * memory-mapped at byte address $C00011 rather than behind a Z80 I/O port. */
+static void genesis_hw_write_psg(uint8_t val) {
+#if defined(RDJ_GENESIS_HARDWARE) || defined(SGDK_GCC) || defined(__m68k__)
+    *((volatile uint8_t*)0xC00011) = val;
+#else
+    (void)val;
+#endif
+}
+
 static void genesis_hw_wait_samples(uint16_t samples) {
     (void)samples;
 }
@@ -118,6 +128,7 @@ rdj_backend_t backend_genesis_hw = {
     .shutdown = genesis_hw_shutdown,
     .write_ym2612 = genesis_hw_write_ym2612,
     .write_apu = genesis_hw_write_apu,
+    .write_psg = genesis_hw_write_psg,
     .wait_samples = genesis_hw_wait_samples,
     .wait_frame = genesis_hw_wait_frame
 };

@@ -12,11 +12,14 @@
 
 extern void vgm_open(const char *filename);
 
-/* Recording backend: captures APU writes so the NES volume mapping can be
- * asserted without a hardware backend. */
+/* Recording backend: captures APU and PSG writes so the NES volume mapping and
+ * the SN76489 note encoding can be asserted without a hardware backend. */
 static uint8_t test_apu[0x20];
+static uint8_t test_psg[64];
+static uint8_t test_psg_count;
 static void rec_init(void) {
     for (int i = 0; i < 0x20; i++) test_apu[i] = 0;
+    test_psg_count = 0;
 }
 static void rec_shutdown(void) {}
 static void rec_write_ym2612(uint8_t port, uint8_t reg, uint8_t val) {
@@ -25,11 +28,15 @@ static void rec_write_ym2612(uint8_t port, uint8_t reg, uint8_t val) {
 static void rec_write_apu(uint16_t addr, uint8_t val) {
     if (addr >= 0x4000 && addr <= 0x4015) test_apu[addr - 0x4000] = val;
 }
+static void rec_write_psg(uint8_t val) {
+    if (test_psg_count < sizeof(test_psg)) test_psg[test_psg_count++] = val;
+}
 static void rec_wait_samples(uint16_t samples) { (void)samples; }
 static void rec_wait_frame(void) {}
 static rdj_backend_t backend_recording = {
     "Recording Backend", rec_init, rec_shutdown,
-    rec_write_ym2612, rec_write_apu, rec_wait_samples, rec_wait_frame
+    rec_write_ym2612, rec_write_apu, rec_write_psg,
+    rec_wait_samples, rec_wait_frame
 };
 
 static void test_input_mapper(void) {
@@ -185,6 +192,56 @@ static void test_sequencer_playback(void) {
     printf("Polyphonic Multi-Channel Sequencer Playback tests passed successfully!\n");
 }
 
+static void test_sn76489_driver(void) {
+    printf("Testing SN76489 (Sega PSG) driver...\n");
+
+    /* Capture every PSG byte the driver emits. */
+    rdj_set_backend(&backend_recording);
+    sn76489_driver.init(3579545);
+
+    /* init() silences all four channels: 0x9F, 0xBF, 0xDF, 0xFF. */
+    assert(test_psg_count == 4);
+    assert(test_psg[0] == 0x9F);
+    assert(test_psg[1] == 0xBF);
+    assert(test_psg[2] == 0xDF);
+    assert(test_psg[3] == 0xFF);
+
+    /* note_on channel 0, MIDI 69 (A-4, 440 Hz): wavelength = 3579545 / (32*440)
+     * = 254 = 0x0FE. Latch byte: 0x80 | ch<<5 | low nibble (0x0E) = 0x8E,
+     * then data byte (0xFE >> 4) & 0x3F = 0x0F. Volume latch for vol 128 maps
+     * to attenuation 0: 0x80 | 0x10 | 0 = 0x90. */
+    test_psg_count = 0;
+    sn76489_driver.note_on(0, 69, 0, 128);
+    assert(test_psg_count == 3);
+    assert(test_psg[0] == 0x8E); /* latch: ch0, freq, low nibble */
+    assert(test_psg[1] == 0x0F); /* data: high 6 bits */
+    assert(test_psg[2] == 0x90); /* latch: ch0, volume, attenuation 0 */
+
+    /* Volume mapping: driver 0..128 -> attenuation 15..0. The top of the range
+     * must clamp to 0 (loudest) instead of wrapping back to silence. */
+    test_psg_count = 0;
+    sn76489_driver.note_on(1, 60, 0, 64);   /* 64>>3 = 8 -> attenuation 7 */
+    assert(test_psg[2] == (uint8_t)(0x80 | (1 << 5) | 0x10 | 7));
+    sn76489_driver.note_on(1, 60, 0, 0);    /* 0 -> attenuation 15 (silent) */
+    assert(test_psg[5] == (uint8_t)(0x80 | (1 << 5) | 0x10 | 15));
+
+    /* note_off writes the channel's volume latch at full attenuation. */
+    test_psg_count = 0;
+    sn76489_driver.note_off(2);
+    assert(test_psg_count == 1);
+    assert(test_psg[0] == (uint8_t)(0x80 | (2 << 5) | 0x10 | 15));
+
+    /* Channel 3 is the noise generator: 0xE0 | white(1)<<3 | note&7. */
+    test_psg_count = 0;
+    sn76489_driver.note_on(3, 3, 1, 128);   /* white noise, divider 3 */
+    assert(test_psg_count == 2);
+    assert(test_psg[0] == (uint8_t)(0xE0 | 0x08 | 3));
+    assert(test_psg[1] == (uint8_t)(0x80 | (3 << 5) | 0x10 | 0));
+
+    rdj_set_backend(&backend_null);
+    printf("SN76489 driver tests passed successfully!\n");
+}
+
 int main(void) {
     printf("Testing Backends...\n");
     rdj_set_backend(&backend_null);
@@ -257,6 +314,7 @@ int main(void) {
 
     test_input_mapper();
     test_sequencer_playback();
+    test_sn76489_driver();
 
     printf("All RetroDJ backend tests passed successfully!\n");
     return 0;

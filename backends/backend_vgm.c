@@ -75,6 +75,9 @@ void vgm_open(const char *filename) {
             header.ident[2] = 'm';
             header.ident[3] = ' ';
             header.version = 0x00000151;
+            header.sn76489_clock = 3579545; /* Sega PSG (SN76489) */
+            header.sn76489_feedback = 0x0009;
+            header.sn76489_shift_reg_width = 16;
             header.ym2612_clock = 7670454;
             header.data_offset = 0x0000000C; /* Data starts at 0x40 relative to 0x34 */
 
@@ -148,6 +151,19 @@ static void vgm_write_apu(uint16_t addr, uint8_t val) {
 #endif
 }
 
+static void vgm_write_psg(uint8_t val) {
+#if !defined(SGDK_GCC) && !defined(RDJ_GENESIS_HARDWARE)
+    if (vgm_file) {
+        fputc(0x50, vgm_file); /* SN76489 PSG write */
+        fputc(val, vgm_file);
+    } else {
+        printf("[VGM] CMD 50 PSG %02X\n", val);
+    }
+#else
+    (void)val;
+#endif
+}
+
 static void vgm_wait_samples(uint16_t samples) {
     total_samples_written += samples;
 #if !defined(SGDK_GCC) && !defined(RDJ_GENESIS_HARDWARE)
@@ -178,6 +194,7 @@ rdj_backend_t backend_vgm = {
     .shutdown = vgm_shutdown,
     .write_ym2612 = vgm_write_ym2612,
     .write_apu = vgm_write_apu,
+    .write_psg = vgm_write_psg,
     .wait_samples = vgm_wait_samples,
     .wait_frame = vgm_wait_frame
 };

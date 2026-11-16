@@ -9,6 +9,7 @@ on:
       - 'core/**'
       - 'drivers/ym2612/**'
       - 'drivers/gb_sound/**'
+      - 'drivers/sn76489/**'
       - 'tests/**'
       - '.github/workflows/build-genesis.yml'
   pull_request:
@@ -19,6 +20,7 @@ on:
       - 'core/**'
       - 'drivers/ym2612/**'
       - 'drivers/gb_sound/**'
+      - 'drivers/sn76489/**'
       - 'tests/**'
       - '.github/workflows/build-genesis.yml'
   workflow_dispatch:
@@ -85,6 +87,7 @@ jobs:
             drivers/ym2612/ym2612_rdj.c \
             drivers/nes_2a03/2a03_rdj.c \
             drivers/gb_sound/gb_rdj.c \
+            drivers/sn76489/sn76489_rdj.c \
             backends/backend_null.c \
             backends/backend_vgm.c \
             backends/backend_serial.c \

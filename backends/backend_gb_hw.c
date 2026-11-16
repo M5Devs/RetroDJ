@@ -44,6 +44,11 @@ static void gb_hw_write_apu(uint16_t addr, uint8_t val) {
 #endif
 }
 
+static void gb_hw_write_psg(uint8_t val) {
+    /* No SN76489 on the Game Boy; kept so the backend table stays uniform. */
+    (void)val;
+}
+
 static void gb_hw_init(void) {
     /* Master enable APU: Bit 7 = 1 in NR52 ($FF26) */
     gb_hw_write_apu(0xFF26, 0x80);
@@ -82,6 +87,7 @@ rdj_backend_t backend_gb_hw = {
     gb_hw_shutdown,
     gb_hw_write_ym2612,
     gb_hw_write_apu,
+    gb_hw_write_psg,
     gb_hw_wait_samples,
     gb_hw_wait_frame
 };
