@@ -42,6 +42,14 @@
 __sfr __at 0x7F SMS_PSG_PORT;
 #endif
 
+#if defined(TARGET_GG) && (defined(__SMS__) || defined(__SDCC_z80))
+/* The Game Gear routes the PSG through a stereo control register at I/O port
+ * $06: one bit per channel for each output (bits 0-3 = right, bits 4-7 = left).
+ * Its power-on value is undefined, and a value of 0x00 silences every channel,
+ * so the backend must explicitly enable all four channels on both outputs. */
+__sfr __at 0x06 GG_STEREO_PORT;
+#endif
+
 static void sms_hw_write_psg(uint8_t val) {
 #if defined(__SMS__) || defined(__SDCC_z80)
     SMS_PSG_PORT = val;
@@ -51,6 +59,10 @@ static void sms_hw_write_psg(uint8_t val) {
 }
 
 static void sms_hw_init(void) {
+#if defined(TARGET_GG) && (defined(__SMS__) || defined(__SDCC_z80))
+    /* Enable every PSG channel on both the left and right outputs. */
+    GG_STEREO_PORT = 0xFF;
+#endif
     /* Silence the PSG so a reset never leaves a channel droning. */
     sms_hw_write_psg(0x9F);
     sms_hw_write_psg(0xBF);

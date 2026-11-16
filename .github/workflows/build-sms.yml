@@ -34,8 +34,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y sdcc
 
-      # The two variants share object files, so each is built from a clean tree
-      # and its ROM is staged before the next build cleans the output directory.
+      # Each variant builds into its own object directory, so both can be built
+      # from a single tree without cleaning in between.
       - name: Build Master System ROM
         run: |
           make -C targets/sms/
@@ -44,7 +44,6 @@ jobs:
 
       - name: Build Game Gear ROM
         run: |
-          make -C targets/sms/ clean
           make -C targets/sms/ GG=1
           mkdir -p dist
           cp targets/sms/out/rom.gg dist/rom.gg
@@ -62,6 +61,33 @@ jobs:
             fi
           done
           [ "$ok" = 1 ]
+
+      # The Game Gear only routes PSG audio to the speakers once I/O port $06
+      # (the stereo control register) is written, so the GG image must contain
+      # the `out ($06),a` opcode (0xD3 0x06) while the plain SMS image must not.
+      - name: Verify PSG Stereo Register
+        run: |
+          python3 - <<'EOF'
+          import sys
+
+          def has_out_port(rom, port):
+              data = open(rom, "rb").read()
+              return any(data[i] == 0xD3 and data[i + 1] == port
+                         for i in range(len(data) - 1))
+
+          gg = has_out_port("dist/rom.gg", 0x06)
+          sms = has_out_port("dist/rom.sms", 0x06)
+          print("rom.gg writes GG stereo port $06:", gg)
+          print("rom.sms writes port $06 (should be False):", sms)
+
+          if not gg:
+              print("Error: rom.gg never enables the Game Gear stereo register; "
+                    "PSG output would be silent on hardware.")
+              sys.exit(1)
+          if sms:
+              print("Error: rom.sms unexpectedly writes I/O port $06.")
+              sys.exit(1)
+          EOF
 
       - name: Upload ROMs
         uses: actions/upload-artifact@v4

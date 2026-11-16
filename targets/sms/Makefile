@@ -23,26 +23,28 @@ OUT_DIR := out
 
 # `make GG=1` builds the Game Gear variant: it defines TARGET_GG, which makes
 # SMSlib read the pad's START key and emit the GG region code in the ROM header.
-# The two variants share object files, so switch between them with `make clean`.
+# Each variant gets its own object directory, so switching between them never
+# reuses the other's objects and no `clean` is needed.
+VARIANT := sms
 ifeq ($(GG),1)
-CFLAGS += -DTARGET_GG
-TARGET  := $(OUT_DIR)/rom.gg
-else
-TARGET  := $(OUT_DIR)/rom.sms
+VARIANT := gg
+CFLAGS  += -DTARGET_GG
 endif
 
-IHX     := $(OUT_DIR)/rom.ihx
+OBJ_DIR := $(OUT_DIR)/$(VARIANT)
+TARGET  := $(OUT_DIR)/rom.$(VARIANT)
+IHX     := $(OBJ_DIR)/rom.ihx
+
+# Sources live in several directories but share no basenames, so VPATH lets a
+# single pattern rule collect them into the variant's object directory.
+VPATH := src:smslib:../../drivers/sn76489:../../backends:../../targets/genesis/src
 
 # Project sources.
 C_SRCS := src/main.c \
           src/ui_sms.c \
           ../../drivers/sn76489/sn76489_rdj.c \
-          ../../backends/backend_sms_hw.c
-
-# Shared with the other targets. Compile into this target's own directory so
-# the toolchains never clobber each other's object files.
-SHARED_SRC := ../../targets/genesis/src/input_mapper.c
-SHARED_REL := src/input_mapper.rel
+          ../../backends/backend_sms_hw.c \
+          ../../targets/genesis/src/input_mapper.c
 
 # Vendored devkitSMS/SMSlib (public domain) subset.
 SMSLIB_SRCS := smslib/SMSlib.c \
@@ -53,10 +55,12 @@ SMSLIB_SRCS := smslib/SMSlib.c \
                smslib/SMSlib_VRAMmemset.c \
                smslib/SMSlib_sprite.c
 
-C_RELS   := $(C_SRCS:.c=.rel) $(SHARED_REL) $(SMSLIB_SRCS:.c=.rel)
-CRT0_REL := crt0_sms.rel
+OBJS := $(addprefix $(OBJ_DIR)/,$(notdir $(C_SRCS:.c=.rel))) \
+        $(addprefix $(OBJ_DIR)/,$(notdir $(SMSLIB_SRCS:.c=.rel)))
 
-RELS := $(CRT0_REL) $(C_RELS)
+CRT0_REL := $(OBJ_DIR)/crt0_sms.rel
+
+RELS := $(CRT0_REL) $(OBJS)
 
 .PHONY: all clean
 
@@ -66,16 +70,14 @@ all: $(TARGET)
 # in the C objects are resolved at link time, and without -g sdasz80 rejects
 # them as undefined.
 $(CRT0_REL): crt0_sms.s
+	@mkdir -p $(OBJ_DIR)
 	$(AS) $(ASFLAGS) -o $@ $<
 
-%.rel: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(SHARED_REL): $(SHARED_SRC)
+$(OBJ_DIR)/%.rel: %.c
+	@mkdir -p $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(IHX): $(RELS)
-	mkdir -p $(OUT_DIR)
 	$(CC) -mz80 --no-std-crt0 --data-loc 0xC000 -o $@ $(RELS)
 
 # makebin -p pads the image to the next power of two (32 KB) so the ROM header
@@ -84,9 +86,4 @@ $(TARGET): $(IHX)
 	$(MAKEBIN) -p $(IHX) $@
 
 clean:
-	rm -f $(OUT_DIR)/rom.sms $(OUT_DIR)/rom.gg $(IHX)
-	rm -f $(CRT0_REL) $(C_RELS)
-	rm -f src/*.rel src/*.lst src/*.asm src/*.sym
-	rm -f smslib/*.rel smslib/*.lst smslib/*.asm smslib/*.sym
-	rm -f ../../drivers/sn76489/*.rel ../../drivers/sn76489/*.lst ../../drivers/sn76489/*.asm
-	rm -f ../../backends/*.rel ../../backends/*.lst ../../backends/*.asm
+	rm -rf $(OUT_DIR)
