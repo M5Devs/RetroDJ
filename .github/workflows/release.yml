@@ -1,0 +1,135 @@
+name: Release
+
+# Cut a release either by pushing a version tag (e.g. `git push origin v0.1.0`)
+# or by running this workflow manually from the Actions tab.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+
+  release:
+    name: Build all ROMs & publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # Toolchains
+      # ------------------------------------------------------------------
+      - name: Install cc65 & SDCC
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cc65 sdcc
+
+      - name: Install GBDK-2020
+        run: |
+          wget -q https://github.com/gbdk-2020/gbdk-2020/releases/download/4.5.0/gbdk-linux64.tar.gz
+          sudo tar -xzf gbdk-linux64.tar.gz -C /opt
+          echo "GBDKDIR=/opt/gbdk/" >> $GITHUB_ENV
+          echo "/opt/gbdk/bin" >> $GITHUB_PATH
+
+      - name: Pull SGDK Docker image
+        run: docker pull ghcr.io/stephane-d/sgdk:latest
+
+      # ------------------------------------------------------------------
+      # Build the five ROMs
+      # ------------------------------------------------------------------
+      - name: Build Genesis ROM (SGDK)
+        run: |
+          mkdir -p targets/genesis/src/core targets/genesis/src/drivers targets/genesis/src/backends
+          cp -r core/* targets/genesis/src/core/
+          cp -r drivers/ym2612/* targets/genesis/src/drivers/
+          cp backends/backend_genesis_hw.c targets/genesis/src/backends/
+          docker run --rm \
+            -v "$PWD/targets/genesis":/src \
+            -u $(id -u):$(id -g) \
+            ghcr.io/stephane-d/sgdk:latest
+          cp targets/genesis/out/rom.bin targets/genesis/out/rom.md
+
+      - name: Build NES ROM (cc65)
+        run: make -C targets/nes/
+
+      - name: Build Game Boy ROM (GBDK-2020)
+        run: make -C targets/gameboy/
+
+      - name: Build Master System ROM (SDCC)
+        run: make -C targets/sms/
+
+      - name: Build Game Gear ROM (SDCC)
+        run: make -C targets/sms/ GG=1
+
+      # ------------------------------------------------------------------
+      # Collect & bundle
+      # ------------------------------------------------------------------
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          else
+            echo "version=v0.1.0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Stage ROMs
+        run: |
+          mkdir -p dist
+          cp targets/genesis/out/rom.md  dist/RetroDJ-Genesis-${{ steps.version.outputs.version }}.md
+          cp targets/nes/out/rom.nes     dist/RetroDJ-NES-${{ steps.version.outputs.version }}.nes
+          cp targets/gameboy/out/rom.gbc dist/RetroDJ-GameBoy-${{ steps.version.outputs.version }}.gbc
+          cp targets/sms/out/rom.sms     dist/RetroDJ-MasterSystem-${{ steps.version.outputs.version }}.sms
+          cp targets/sms/out/rom.gg      dist/RetroDJ-GameGear-${{ steps.version.outputs.version }}.gg
+
+      - name: Verify ROMs
+        run: |
+          ok=1
+          for rom in dist/*.md dist/*.nes dist/*.gbc dist/*.sms dist/*.gg; do
+            if [ -s "$rom" ]; then
+              echo "OK  $rom  ($(stat -c%s "$rom") bytes)"
+            else
+              echo "MISSING $rom"
+              ok=0
+            fi
+          done
+          [ "$ok" = 1 ]
+
+      - name: Bundle ROMs into zip
+        run: |
+          cd dist
+          zip -9 "RetroDJ-${{ steps.version.outputs.version }}-ROMs.zip" \
+            "RetroDJ-Genesis-${{ steps.version.outputs.version }}.md" \
+            "RetroDJ-NES-${{ steps.version.outputs.version }}.nes" \
+            "RetroDJ-GameBoy-${{ steps.version.outputs.version }}.gbc" \
+            "RetroDJ-MasterSystem-${{ steps.version.outputs.version }}.sms" \
+            "RetroDJ-GameGear-${{ steps.version.outputs.version }}.gg"
+          ls -la
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: RetroDJ-${{ steps.version.outputs.version }}-ROMs
+          path: dist/*
+
+      # ------------------------------------------------------------------
+      # Publish
+      # ------------------------------------------------------------------
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: RetroDJ ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/RetroDJ-Genesis-${{ steps.version.outputs.version }}.md
+            dist/RetroDJ-NES-${{ steps.version.outputs.version }}.nes
+            dist/RetroDJ-GameBoy-${{ steps.version.outputs.version }}.gbc
+            dist/RetroDJ-MasterSystem-${{ steps.version.outputs.version }}.sms
+            dist/RetroDJ-GameGear-${{ steps.version.outputs.version }}.gg
+            dist/RetroDJ-${{ steps.version.outputs.version }}-ROMs.zip

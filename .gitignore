@@ -23,3 +23,9 @@ test_output.vgm
 targets/genesis/src/core/
 targets/genesis/src/drivers/
 targets/genesis/src/backends/
+
+# SGDK container-generated boot sources
+targets/genesis/src/boot/
+
+# Release packaging output
+dist/
