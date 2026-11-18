@@ -7,6 +7,7 @@
 #include "core/rdj_driver.h"
 #include "core/sequencer.h"
 #include "core/rdj_backend.h"
+#include "core/rdj_ym2612.h"
 #include "targets/genesis/src/input_mapper.h"
 #include "targets/genesis/src/ui.h"
 
@@ -17,13 +18,23 @@ extern void vgm_open(const char *filename);
 static uint8_t test_apu[0x20];
 static uint8_t test_psg[64];
 static uint8_t test_psg_count;
+static uint8_t test_ym_port[64];
+static uint8_t test_ym_reg[64];
+static uint8_t test_ym_val[64];
+static uint8_t test_ym_count;
 static void rec_init(void) {
     for (int i = 0; i < 0x20; i++) test_apu[i] = 0;
     test_psg_count = 0;
+    test_ym_count = 0;
 }
 static void rec_shutdown(void) {}
 static void rec_write_ym2612(uint8_t port, uint8_t reg, uint8_t val) {
-    (void)port; (void)reg; (void)val;
+    if (test_ym_count < sizeof(test_ym_reg)) {
+        test_ym_port[test_ym_count] = port;
+        test_ym_reg[test_ym_count] = reg;
+        test_ym_val[test_ym_count] = val;
+        test_ym_count++;
+    }
 }
 static void rec_write_apu(uint16_t addr, uint8_t val) {
     if (addr >= 0x4000 && addr <= 0x4015) test_apu[addr - 0x4000] = val;
@@ -102,12 +113,16 @@ static void test_input_mapper(void) {
     assert(song->patterns[0].rows[1][0].volume == 0);
     input_mapper_update(state, song, 0);
 
-    /* 8. Test BUTTON_START (Toggle Play / Stop) */
+    /* 8. Test BUTTON_START (Toggle Play / Stop).
+     * The toggle fires on release so that START held with a direction can cycle
+     * screens without also starting playback. */
     assert(state->is_playing == 0);
     input_mapper_update(state, song, BUTTON_START);
-    assert(state->is_playing == 1);
+    assert(state->is_playing == 0);      /* still held: no toggle yet */
     input_mapper_update(state, song, 0);
+    assert(state->is_playing == 1);      /* released alone: toggled on */
     input_mapper_update(state, song, BUTTON_START);
+    input_mapper_update(state, song, 0);
     assert(state->is_playing == 0);
     input_mapper_update(state, song, 0);
 
@@ -242,6 +257,258 @@ static void test_sn76489_driver(void) {
     printf("SN76489 driver tests passed successfully!\n");
 }
 
+/* Dual 3-button navigation: screen cycling, cursor walk into the sidebar and
+ * the START-modifier consumption rule. */
+static void test_screen_navigation(void) {
+    printf("Testing Dual 3-Button Screen Navigation...\n");
+    ui_init();
+
+    input_tracker_state_t *state = ui_get_tracker_state();
+    rdj_song_t *song = ui_get_song();
+
+    /* Starts on the pattern editor. */
+    assert(state->screen == UI_SCREEN_PAT);
+
+    /* START + RIGHT cycles PAT -> SONG, and consumes START so no playback. */
+    input_mapper_update(state, song, BUTTON_START);
+    input_mapper_update(state, song, BUTTON_START | BUTTON_RIGHT);
+    assert(state->screen == UI_SCREEN_SONG);
+    input_mapper_update(state, song, BUTTON_START);
+    input_mapper_update(state, song, 0);
+    assert(state->is_playing == 0);   /* START consumed: no toggle */
+
+    /* START + RIGHT again -> PATCH, then wraps back to PAT. */
+    input_mapper_update(state, song, BUTTON_START);
+    input_mapper_update(state, song, BUTTON_START | BUTTON_RIGHT);
+    assert(state->screen == UI_SCREEN_PATCH);
+    input_mapper_update(state, song, BUTTON_START);
+    input_mapper_update(state, song, BUTTON_START | BUTTON_RIGHT);
+    assert(state->screen == UI_SCREEN_PAT);
+    input_mapper_update(state, song, 0);
+
+    /* START + LEFT cycles backwards: PAT -> PATCH. */
+    input_mapper_update(state, song, BUTTON_START);
+    input_mapper_update(state, song, BUTTON_START | BUTTON_LEFT);
+    assert(state->screen == UI_SCREEN_PATCH);
+    input_mapper_update(state, song, 0);
+
+    /* 6-button MODE cycles on its own: PATCH -> PAT. */
+    input_mapper_update(state, song, BUTTON_MODE);
+    assert(state->screen == UI_SCREEN_PAT);
+    input_mapper_update(state, song, 0);
+
+    /* Cursor walk: from FM6 (last sub-column of channel 5) RIGHT enters the
+     * sidebar; UP/DOWN picks a tab and A opens it. */
+    state->screen = UI_SCREEN_PAT;
+    state->cursor_channel = RDJ_MAX_CHANNELS - 1;
+    state->cursor_subcol = RDJ_NUM_SUBCOLS - 1;
+    state->sidebar_focus = 0;
+    input_mapper_update(state, song, 0);
+    input_mapper_update(state, song, BUTTON_RIGHT);
+    assert(state->sidebar_focus == 1);
+    input_mapper_update(state, song, 0);
+
+    /* Tab starts at PAT; DOWN -> SONG, DOWN -> PATCH. */
+    assert(state->sidebar_tab == UI_TAB_PAT);
+    input_mapper_update(state, song, BUTTON_DOWN);
+    assert(state->sidebar_tab == UI_TAB_SONG);
+    input_mapper_update(state, song, 0);
+    input_mapper_update(state, song, BUTTON_DOWN);
+    assert(state->sidebar_tab == UI_TAB_PATCH);
+    input_mapper_update(state, song, 0);
+
+    /* A enters the highlighted screen and leaves the sidebar. */
+    input_mapper_update(state, song, BUTTON_A);
+    assert(state->screen == UI_SCREEN_PATCH);
+    assert(state->sidebar_focus == 0);
+    input_mapper_update(state, song, 0);
+
+    /* Walk in again and LEFT returns to the grid without switching screens. */
+    state->screen = UI_SCREEN_PAT;
+    state->sidebar_focus = 0;
+    input_mapper_update(state, song, BUTTON_RIGHT);
+    assert(state->sidebar_focus == 1);
+    input_mapper_update(state, song, 0);
+    input_mapper_update(state, song, BUTTON_LEFT);
+    assert(state->sidebar_focus == 0);
+    assert(state->screen == UI_SCREEN_PAT);
+    input_mapper_update(state, song, 0);
+
+    printf("Dual 3-Button Screen Navigation tests passed successfully!\n");
+}
+
+/* SONG screen: slot/pattern assignment, order length and the pattern preview
+ * follow the selected slot. */
+static void test_song_playlist(void) {
+    printf("Testing Song Playlist Editing...\n");
+    ui_init();
+
+    input_tracker_state_t *state = ui_get_tracker_state();
+    rdj_song_t *song = ui_get_song();
+
+    state->screen = UI_SCREEN_SONG;
+    state->song_cursor = 0;
+
+    /* Default order is identity and length 1. */
+    assert(song->order_length == 1);
+    assert(song->order[0] == 0);
+
+    /* A + UP assigns the next pattern to slot 0. */
+    input_mapper_update(state, song, BUTTON_A);
+    input_mapper_update(state, song, BUTTON_A | BUTTON_UP);
+    assert(song->order[0] == 1);
+    input_mapper_update(state, song, BUTTON_A);          /* release UP */
+    input_mapper_update(state, song, BUTTON_A | BUTTON_UP);
+    assert(song->order[0] == 2);
+    input_mapper_update(state, song, 0);
+
+    /* A + DOWN steps it back. */
+    input_mapper_update(state, song, BUTTON_A);
+    input_mapper_update(state, song, BUTTON_A | BUTTON_DOWN);
+    assert(song->order[0] == 1);
+    input_mapper_update(state, song, 0);
+
+    /* B + UP extends the order length; the cursor can then move into slot 1. */
+    input_mapper_update(state, song, BUTTON_B);
+    input_mapper_update(state, song, BUTTON_B | BUTTON_UP);
+    assert(song->order_length == 2);
+    input_mapper_update(state, song, BUTTON_B);          /* release UP */
+    input_mapper_update(state, song, BUTTON_B | BUTTON_UP);
+    assert(song->order_length == 3);
+    input_mapper_update(state, song, 0);
+    input_mapper_update(state, song, BUTTON_DOWN);
+    assert(state->song_cursor == 1);
+    input_mapper_update(state, song, 0);
+
+    /* B + DOWN shrinks it and clamps the cursor. */
+    input_mapper_update(state, song, BUTTON_B);
+    input_mapper_update(state, song, BUTTON_B | BUTTON_DOWN);
+    assert(song->order_length == 2);
+    input_mapper_update(state, song, BUTTON_B);          /* release DOWN */
+    input_mapper_update(state, song, BUTTON_B | BUTTON_DOWN);
+    assert(song->order_length == 1);
+    assert(state->song_cursor == 0);
+    input_mapper_update(state, song, 0);
+
+    /* A + RIGHT opens the slot's pattern in the PAT editor. */
+    state->song_cursor = 0;
+    song->order[0] = 3;
+    input_mapper_update(state, song, BUTTON_A);
+    input_mapper_update(state, song, BUTTON_A | BUTTON_RIGHT);
+    assert(state->screen == UI_SCREEN_PAT);
+    assert(state->edit_pattern == 3);
+    input_mapper_update(state, song, 0);
+
+    printf("Song Playlist Editing tests passed successfully!\n");
+}
+
+/* Playback walks the order list: after the last row of a pattern it advances to
+ * the next order slot (and wraps at the end of the song). */
+static void test_song_order_playback(void) {
+    printf("Testing Song Order Playback Chain...\n");
+    ui_init();
+
+    input_tracker_state_t *state = ui_get_tracker_state();
+    rdj_song_t *song = ui_get_song();
+
+    /* Two one-row patterns chained: order = [0, 1]. */
+    song->order[0] = 0;
+    song->order[1] = 1;
+    song->order_length = 2;
+    song->patterns[0].length = 1;
+    song->patterns[1].length = 1;
+    song->patterns[0].speed = 1;
+    song->patterns[1].speed = 1;
+    song->patterns[0].rows[0][0].note = 60;  /* C-4 */
+    song->patterns[1].rows[0][0].note = 64;  /* E-4 */
+
+    state->screen = UI_SCREEN_SONG;   /* playback position lives in the state */
+    state->is_playing = 1;
+
+    /* Frame 0: play order slot 0, row 0. */
+    ui_update();
+    assert(state->play_order_pos == 0);
+
+    /* Frame 1: advance past the single row -> order slot 1. */
+    ui_update();
+    assert(state->play_order_pos == 1);
+
+    /* Frame 2: advance -> wraps back to order slot 0. */
+    ui_update();
+    assert(state->play_order_pos == 0);
+
+    state->is_playing = 0;
+    ui_update();
+
+    printf("Song Order Playback Chain tests passed successfully!\n");
+}
+
+/* PATCH editor: B + DIR edits the selected operator parameter in the live patch
+ * bank and re-writes the YM2612 registers so the change is audible at once. */
+static void test_patch_editor(void) {
+    printf("Testing FM Patch Editor...\n");
+    ui_init();
+
+    input_tracker_state_t *state = ui_get_tracker_state();
+    rdj_song_t *song = ui_get_song();
+
+    ym2612_patch_t *p = ym2612_rdj_get_patch(0);
+    assert(p != NULL);
+    assert(ym2612_rdj_get_patch(YM2612_MAX_PATCHES) == NULL);
+
+    /* The recording backend captures the register writes the editor emits. */
+    rdj_set_backend(&backend_recording);
+    ym2612_driver.init(7670454);
+
+    state->screen = UI_SCREEN_PATCH;
+    state->patch_slot = 0;
+    state->patch_op = 0;
+
+    /* Select ALGORITHM (row 0) and bump it: 4 -> 5. */
+    state->patch_row = UI_PATCH_ROW_ALGO;
+    {
+        uint8_t before = p->FB_ALG & 0x07;
+        input_mapper_update(state, song, BUTTON_B);
+        input_mapper_update(state, song, BUTTON_B | BUTTON_UP);
+        assert((p->FB_ALG & 0x07) == (uint8_t)(before + 1));
+        input_mapper_update(state, song, 0);
+    }
+
+    /* Select OP2 TOTAL LEVEL (row 4, op 1) and lower it by one. */
+    state->patch_row = UI_PATCH_ROW_TL;
+    state->patch_op = 1;
+    {
+        uint8_t before = p->ops[1].TL;
+        test_ym_count = 0;
+        input_mapper_update(state, song, BUTTON_B);
+        input_mapper_update(state, song, BUTTON_B | BUTTON_DOWN);
+        assert(p->ops[1].TL == (uint8_t)(before - 1));
+        input_mapper_update(state, song, 0);
+        /* The live update must have written the operator's total level (0x40). */
+        {
+            int found = 0;
+            for (int i = 0; i < test_ym_count; i++) {
+                if (test_ym_reg[i] == 0x40) { found = 1; break; }
+            }
+            assert(found == 1);
+        }
+    }
+
+    /* A + RIGHT switches instrument slot. */
+    state->patch_slot = 0;
+    input_mapper_update(state, song, BUTTON_A);
+    input_mapper_update(state, song, BUTTON_A | BUTTON_RIGHT);
+    assert(state->patch_slot == 1);
+    input_mapper_update(state, song, 0);
+    input_mapper_update(state, song, BUTTON_A);
+    input_mapper_update(state, song, BUTTON_A | BUTTON_LEFT);
+    assert(state->patch_slot == 0);
+    input_mapper_update(state, song, 0);
+
+    rdj_set_backend(&backend_null);
+    printf("FM Patch Editor tests passed successfully!\n");
+}
+
 int main(void) {
     printf("Testing Backends...\n");
     rdj_set_backend(&backend_null);
@@ -315,6 +582,10 @@ int main(void) {
     test_input_mapper();
     test_sequencer_playback();
     test_sn76489_driver();
+    test_screen_navigation();
+    test_song_playlist();
+    test_song_order_playback();
+    test_patch_editor();
 
     printf("All RetroDJ backend tests passed successfully!\n");
     return 0;

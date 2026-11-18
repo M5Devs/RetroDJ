@@ -15,21 +15,7 @@
 
 #include "core/rdj_driver.h"
 #include "core/sequencer.h"
-
-/* YM2612 patch structure definition */
-typedef struct {
-    uint8_t DT_MUL, TL, AR, DR, SR, SL_RR, SSG_EG;
-} ym2612_op_test_t;
-
-typedef struct {
-    ym2612_op_test_t ops[4];
-    uint8_t FB_ALG;
-    uint8_t LR_AMS_PMS;
-} ym2612_patch_test_t;
-
-extern void ym2612_rdj_set_patch(uint8_t inst_slot, void *patch);
-extern void ym2612_rdj_note_on(uint8_t channel, uint8_t note, uint8_t instrument);
-extern void ym2612_rdj_note_off(uint8_t channel);
+#include "core/rdj_ym2612.h"
 
 static rdj_song_t g_song;
 static input_tracker_state_t g_tracker_state;
@@ -37,6 +23,7 @@ static input_tracker_state_t g_tracker_state;
 static uint8_t s_tick_counter = 0;
 static uint8_t s_current_play_row = 0;
 static uint8_t s_prev_is_playing = 0;
+static uint8_t s_play_order_pos = 0;
 
 void get_note_name(uint8_t note, char *out) {
     if (note == RDJ_NOTE_EMPTY || note == 0) {
@@ -106,6 +93,9 @@ static u16 s_screen[UI_COLS * UI_ROWS];    /* per-frame BG_A tilemap image   */
 static u16 s_frame = 0;
 static uint8_t s_prev_cr = 0xFF, s_prev_cc = 0xFF;
 static uint8_t s_prev_play = 0xFF, s_prev_pr = 0xFF;
+static uint8_t s_prev_screen = 0xFF, s_prev_focus = 0xFF, s_prev_tab = 0xFF;
+static uint8_t s_prev_songcur = 0xFF, s_prev_patchslot = 0xFF;
+static uint8_t s_prev_patchrow = 0xFF, s_prev_patchop = 0xFF, s_prev_editpat = 0xFF;
 
 static uint8_t s_grid_start = 0;           /* first pattern row on screen    */
 static uint8_t s_hl_x = 0xFF;              /* BG_B highlight x, 0xFF = off   */
@@ -191,11 +181,14 @@ static void ui_clear_bg_b(void) {
 static uint8_t hud_note(uint8_t ch) {
     int base = g_tracker_state.is_playing ? s_current_play_row : g_tracker_state.cursor_row;
     int d;
+    uint8_t pat = g_tracker_state.is_playing
+                  ? g_song.order[g_tracker_state.play_order_pos]
+                  : g_tracker_state.edit_pattern;
     for (d = 0; d < 8; d++) {
         int r = base - d;
         while (r < 0) r += RDJ_MAX_ROWS;
-        if (g_song.patterns[0].rows[r][ch].note != RDJ_NOTE_EMPTY) {
-            return g_song.patterns[0].rows[r][ch].note;
+        if (g_song.patterns[pat].rows[r][ch].note != RDJ_NOTE_EMPTY) {
+            return g_song.patterns[pat].rows[r][ch].note;
         }
     }
     return RDJ_NOTE_EMPTY;
@@ -204,11 +197,14 @@ static uint8_t hud_note(uint8_t ch) {
 static uint8_t hud_level(uint8_t ch) {
     int base = g_tracker_state.is_playing ? s_current_play_row : g_tracker_state.cursor_row;
     int d;
+    uint8_t pat = g_tracker_state.is_playing
+                  ? g_song.order[g_tracker_state.play_order_pos]
+                  : g_tracker_state.edit_pattern;
     for (d = 0; d < 8; d++) {
         int r = base - d;
         while (r < 0) r += RDJ_MAX_ROWS;
         {
-            uint8_t n = g_song.patterns[0].rows[r][ch].note;
+            uint8_t n = g_song.patterns[pat].rows[r][ch].note;
             if (n == RDJ_NOTE_OFF) return 0;
             if (n != RDJ_NOTE_EMPTY) {
                 int lv = 4 - (d / 2);
@@ -221,13 +217,27 @@ static uint8_t hud_level(uint8_t ch) {
 
 /* ---- screen sections ---- */
 static void ui_build_header(void) {
-    char buf[12];
+    char buf[16];
     int cpu, filled, i, x;
 
-    str_put(6, HDR_TITLE_ROW, "--- RetroDJ Genesis v1.2 ---", ATTR_CYAN);
+    switch (g_tracker_state.screen) {
+        case UI_SCREEN_SONG:
+            str_put(1, HDR_TITLE_ROW, "--- RetroDJ Genesis: Song Playlist ---", ATTR_CYAN);
+            break;
+        case UI_SCREEN_PATCH: {
+            char t[41];
+            sprintf(t, "--- YM2612 FM Patch Editor [INST %02X] ---",
+                    g_tracker_state.patch_slot);
+            str_put(0, HDR_TITLE_ROW, t, ATTR_CYAN);
+            break;
+        }
+        default:
+            str_put(6, HDR_TITLE_ROW, "--- RetroDJ Genesis v1.2 ---", ATTR_CYAN);
+            break;
+    }
     str_put(0, HDR_DIV_ROW, "========================================", ATTR_CYAN);
 
-    /* BPM:130 [PLAY] OCT:4 CPU:[||||||||||] 42% */
+    /* BPM:130 [PLAY] OCT:4 CPU:[|||||||||] 42% */
     x = 0;
     str_put(x, HDR_STATUS_ROW, "BPM:", ATTR_WHITE);          x += 4;
     sprintf(buf, "%3d", g_song.bpm);
@@ -251,12 +261,11 @@ static void ui_build_header(void) {
         cell_put(x++, HDR_STATUS_ROW, (i < filled) ? '|' : '.', ATTR_WHITE);
     }
     cell_put(x++, HDR_STATUS_ROW, ']', ATTR_WHITE);
-    /* Right-aligned 3-digit field plus '%' keeps the line within 40 columns
-     * even when the load reads 100. */
     sprintf(buf, "%3d%%", cpu);
     str_put(x, HDR_STATUS_ROW, buf, ATTR_WHITE);
 }
 
+/* ---- [PAT] pattern editor ---- */
 static void ui_build_grid(void) {
     uint8_t cr = g_tracker_state.cursor_row;
     uint8_t start, i, c;
@@ -266,7 +275,6 @@ static void ui_build_grid(void) {
     if (start > (RDJ_MAX_ROWS - GRID_ROWS)) start = (RDJ_MAX_ROWS - GRID_ROWS);
     s_grid_start = start;
 
-    /* header: "R FM1  FM2  FM3  FM4  FM5  FM6 " (cols 0..31) */
     str_put(0, MATRIX_HDR_ROW, "R ", ATTR_CYAN);
     for (c = 0; c < 6; c++) {
         hdr[0] = 'F'; hdr[1] = 'M'; hdr[2] = (char)('1' + c);
@@ -284,7 +292,7 @@ static void ui_build_grid(void) {
         cell_put(x++, y, hex_char(r),      is_cursor_row ? ATTR_AMBER : ATTR_WHITE);
 
         for (c = 0; c < 6; c++) {
-            rdj_row_t *cell = &g_song.patterns[0].rows[r][c];
+            rdj_row_t *cell = &g_song.patterns[g_tracker_state.edit_pattern].rows[r][c];
             char nb[4];
             bool is_curr_cell = is_cursor_row && (g_tracker_state.cursor_channel == c);
             u16 attr = is_curr_cell ? ATTR_WHITE : (is_cursor_row ? ATTR_CYAN : ATTR_WHITE);
@@ -299,20 +307,29 @@ static void ui_build_grid(void) {
     }
 }
 
+/* Tab column shared by every screen: rows 5/6/7 hold [PAT]/[SONG]/[PATCH]. */
+static void ui_build_tabs(void) {
+    static const char *names[UI_NUM_SCREENS] = { "|[PAT]  ", "|[SONG] ", "|[PATCH]" };
+    int t;
+    for (t = 0; t < UI_NUM_SCREENS; t++) {
+        u16 attr = ATTR_CYAN;
+        if ((uint8_t)t == g_tracker_state.screen) attr = ATTR_AMBER;
+        if (g_tracker_state.sidebar_focus && (uint8_t)t == g_tracker_state.sidebar_tab) {
+            attr = ATTR_RED;   /* cursor-walk selection */
+        }
+        str_put(HUD_X, 5 + t, names[t], attr);
+    }
+}
+
 static void ui_build_hud(void) {
     uint8_t c;
     int x = HUD_X;
     char line[12];
 
     str_put(x, MATRIX_HDR_ROW, "|HUD:MIX", ATTR_CYAN);
-
-    /* mode tabs, PAT highlighted */
-    str_put(x, 5, "|[PAT]  ", ATTR_AMBER);
-    str_put(x, 6, "|[SONG] ", ATTR_CYAN);
-    str_put(x, 7, "|[PATCH]", ATTR_CYAN);
+    ui_build_tabs();
     str_put(x, 8, "|-------", ATTR_CYAN);
 
-    /* live channel note read-outs */
     for (c = 0; c < 6; c++) {
         char nb[4];
         get_note_name(hud_note(c), nb);
@@ -326,7 +343,6 @@ static void ui_build_hud(void) {
 
     str_put(x, 15, "|-------", ATTR_CYAN);
 
-    /* VU meters */
     for (c = 0; c < 6; c++) {
         int y = 16 + c;
         uint8_t lv = hud_level(c);
@@ -343,10 +359,9 @@ static void ui_build_hud(void) {
 
     str_put(x, 22, "|-------", ATTR_CYAN);
 
-    /* active cell detail */
     {
-        rdj_row_t *cell = &g_song.patterns[0].rows[g_tracker_state.cursor_row]
-                                                 [g_tracker_state.cursor_channel];
+        rdj_row_t *cell = &g_song.patterns[g_tracker_state.edit_pattern]
+                                    .rows[g_tracker_state.cursor_row][g_tracker_state.cursor_channel];
         sprintf(line, "|I:%02X", cell->instrument);
         str_put(x, 23, line, ATTR_WHITE);
         sprintf(line, "|V:%02X", cell->volume);
@@ -354,20 +369,169 @@ static void ui_build_hud(void) {
     }
 }
 
-static void ui_build_footer(void) {
-    str_put(0, FOOT_DIV_ROW, "========================================", ATTR_CYAN);
-    str_put(0, FOOT_HELP_ROW, "A+DIR:Note B+DIR:Val START:Play C:Audit", ATTR_WHITE);
+/* ---- [SONG] playlist screen ---- */
+static void ui_build_song(void) {
+    uint8_t i;
+    char line[24];
+    int x, y;
+
+    str_put(0, MATRIX_HDR_ROW, "SLOT PAT  SLOT PAT  SLOT PAT  SLOT PAT ", ATTR_CYAN);
+
+    /* 16 slots (RDJ_MAX_PATTERNS) laid out as 4 columns x 4 rows. */
+    for (i = 0; i < RDJ_MAX_PATTERNS; i++) {
+        int col = i / 4;
+        int row = i % 4;
+        x = col * 10;
+        y = GRID_ROW0 + row;
+        {
+            uint8_t sel = (i == g_tracker_state.song_cursor);
+            uint8_t playing = g_tracker_state.is_playing &&
+                              (i == g_tracker_state.play_order_pos);
+            u16 attr = sel ? ATTR_AMBER : ATTR_WHITE;
+            if (playing) attr = ATTR_RED;
+            sprintf(line, "%02X:PAT%02X", i, g_song.order[i]);
+            str_put(x, y, line, attr);
+        }
+    }
+
+    str_put(0, 10, "----------------------------------------", ATTR_CYAN);
+
+    sprintf(line, "ORDER LENGTH: %02X", g_song.order_length);
+    str_put(0, 11, line, ATTR_WHITE);
+
+    sprintf(line, "PLAY POS: %02X / %02X", g_tracker_state.play_order_pos,
+            (uint8_t)(g_song.order_length ? g_song.order_length - 1 : 0));
+    str_put(0, 12, line, g_tracker_state.is_playing ? ATTR_RED : ATTR_WHITE);
+
+    sprintf(line, "EDIT PATTERN: %02X", g_tracker_state.edit_pattern);
+    str_put(0, 13, line, ATTR_WHITE);
+
+    str_put(0, 14, "PATTERN PREVIEW:", ATTR_CYAN);
+    {
+        uint8_t pat = g_song.order[g_tracker_state.song_cursor];
+        for (i = 0; i < 10; i++) {
+            rdj_row_t *r = &g_song.patterns[pat].rows[i][0];
+            char nb[4];
+            get_note_name(r->note, nb);
+            sprintf(line, "%02X %s %02X %02X", i, nb, r->instrument, r->volume);
+            str_put(0, 15 + i, line, ATTR_WHITE);
+        }
+    }
 }
 
-/* Amber box drawn on BG_B behind the active editing cell. */
+/* ---- [PATCH] FM synth editor ---- */
+static const char *s_patch_row_names[UI_PATCH_NUM_ROWS] = {
+    "ALGORITHM", "FEEDBACK ", "PAN      ",
+    "DT/MUL   ", "TL       ", "AR       ", "DR       ",
+    "SR       ", "SL/RR    ", "SSG      "
+};
+
+/* Operator parameter a given row edits, or -1 for a channel-global row. */
+static int patch_row_is_op(uint8_t row) {
+    return (row >= UI_PATCH_ROW_DTMUL);
+}
+
+static void patch_row_value(char *out, uint8_t row, uint8_t op) {
+    ym2612_patch_t *p = ym2612_rdj_get_patch(g_tracker_state.patch_slot);
+    if (!p) { out[0] = '?'; out[1] = '\0'; return; }
+    switch (row) {
+        case UI_PATCH_ROW_ALGO: sprintf(out, "%d", p->FB_ALG & 0x07); break;
+        case UI_PATCH_ROW_FB:   sprintf(out, "%d", (p->FB_ALG >> 3) & 0x07); break;
+        case UI_PATCH_ROW_PAN: {
+            uint8_t pan = (uint8_t)((p->LR_AMS_PMS >> 6) & 0x03);
+            out[0] = (pan & 0x02) ? 'L' : '-';
+            out[1] = (pan & 0x01) ? 'R' : '-';
+            out[2] = '\0';
+            break;
+        }
+        case UI_PATCH_ROW_DTMUL:
+            sprintf(out, "%d/%d", (p->ops[op].DT_MUL >> 4) & 0x07, p->ops[op].DT_MUL & 0x0F);
+            break;
+        case UI_PATCH_ROW_TL:   sprintf(out, "%03d", p->ops[op].TL); break;
+        case UI_PATCH_ROW_AR:   sprintf(out, "%03d", p->ops[op].AR); break;
+        case UI_PATCH_ROW_DR:   sprintf(out, "%03d", p->ops[op].DR); break;
+        case UI_PATCH_ROW_SR:   sprintf(out, "%03d", p->ops[op].SR); break;
+        case UI_PATCH_ROW_SLRR:
+            sprintf(out, "%d/%d", (p->ops[op].SL_RR >> 4) & 0x0F, p->ops[op].SL_RR & 0x0F);
+            break;
+        case UI_PATCH_ROW_SSG:  sprintf(out, "%03d", p->ops[op].SSG_EG); break;
+        default: out[0] = '\0'; break;
+    }
+}
+
+static void ui_build_patch(void) {
+    char val[8];
+    uint8_t row;
+    int y;
+
+    str_put(0, MATRIX_HDR_ROW, "PARAM | OP1 | OP2 | OP3 | OP4 |", ATTR_CYAN);
+    str_put(0, GRID_ROW0, "------+-----+-----+-----+-----+", ATTR_CYAN);
+
+    for (row = 0; row < UI_PATCH_NUM_ROWS; row++) {
+        y = GRID_ROW0 + 1 + row;
+        {
+            u16 rattr = (row == g_tracker_state.patch_row) ? ATTR_AMBER : ATTR_WHITE;
+            str_put(0, y, s_patch_row_names[row], rattr);
+        }
+        if (patch_row_is_op(row)) {
+            uint8_t op;
+            for (op = 0; op < 4; op++) {
+                patch_row_value(val, row, op);
+                {
+                    bool sel = (row == g_tracker_state.patch_row) &&
+                               (op == g_tracker_state.patch_op);
+                    u16 attr = sel ? ATTR_RED : ATTR_WHITE;
+                    cell_put(7 + op * 6, y, '|', ATTR_CYAN);
+                    str_put(9 + op * 6, y, val, attr);
+                }
+            }
+        } else {
+            patch_row_value(val, row, 0);
+            str_put(10, y, val, (row == g_tracker_state.patch_row) ? ATTR_RED : ATTR_WHITE);
+        }
+    }
+
+    str_put(0, 25, "----------------------------------------", ATTR_CYAN);
+    {
+        char line[24];
+        sprintf(line, "SLOT %02X  OCT %d   A:Audition",
+                g_tracker_state.patch_slot, g_tracker_state.octave % 10);
+        str_put(0, FOOT_HELP_ROW, line, ATTR_WHITE);
+    }
+}
+
+static void ui_build_footer(void) {
+    str_put(0, FOOT_DIV_ROW, "========================================", ATTR_CYAN);
+    switch (g_tracker_state.screen) {
+        case UI_SCREEN_SONG:
+            str_put(0, FOOT_HELP_ROW, "DIR:Slot A+PAT B:Len START:Play", ATTR_WHITE);
+            break;
+        case UI_SCREEN_PATCH:
+            str_put(0, FOOT_HELP_ROW, "DIR:Sel B+DIR:Val A+DIR:Slot C:Aud", ATTR_WHITE);
+            break;
+        default:
+            str_put(0, FOOT_HELP_ROW, "A+DIR:Note B+DIR:Val START:Play C:Audit", ATTR_WHITE);
+            break;
+    }
+}
+
+/* Amber box drawn on BG_B behind the active editing cell (PAT grid only). */
 static void ui_update_highlight(void) {
-    int x = 2 + (g_tracker_state.cursor_channel * 5);
-    int y = GRID_ROW0 + (g_tracker_state.cursor_row - s_grid_start);
-    bool visible = (g_tracker_state.cursor_row >= s_grid_start) &&
-                   (g_tracker_state.cursor_row < (s_grid_start + GRID_ROWS));
+    int x = 0, y = 0, w = 5;
+    bool want = (g_tracker_state.screen == UI_SCREEN_PAT) &&
+                !g_tracker_state.sidebar_focus;
     int i;
 
-    if (!visible) {
+    if (want) {
+        x = 2 + (g_tracker_state.cursor_channel * 5);
+        y = GRID_ROW0 + (g_tracker_state.cursor_row - s_grid_start);
+        if ((g_tracker_state.cursor_row < s_grid_start) ||
+            (g_tracker_state.cursor_row >= (s_grid_start + GRID_ROWS))) {
+            want = false;
+        }
+    }
+
+    if (!want) {
         if (s_hl_x != 0xFF) {
             for (i = 0; i < 5; i++) {
                 VDP_setTileMapXY(BG_B, TILE_ATTR_FULL(PAL0, 0, 0, 0, TILE_FONT_INDEX),
@@ -386,48 +550,74 @@ static void ui_update_highlight(void) {
                              s_hl_x + i, s_hl_y);
         }
     }
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < w; i++) {
         VDP_setTileMapXY(BG_B, TILE_ATTR_FULL(PAL0, 0, 0, 0, TILE_HILITE), x + i, y);
     }
     s_hl_x = (uint8_t)x;
     s_hl_y = (uint8_t)y;
 }
 
+/* Compose whichever screen is active. */
+static void ui_build_screen(void) {
+    ui_build_header();
+    switch (g_tracker_state.screen) {
+        case UI_SCREEN_SONG:  ui_build_song();  break;
+        case UI_SCREEN_PATCH: ui_build_patch(); break;
+        default:              ui_build_grid(); ui_build_hud(); break;
+    }
+    ui_build_footer();
+}
+
 #endif /* Genesis hardware */
 
-static void ui_trigger_row_notes(uint8_t row) {
+static void ui_trigger_row_notes(uint8_t pattern, uint8_t row) {
     for (uint8_t ch = 0; ch < 6; ch++) {
-        rdj_row_t *r = &g_song.patterns[0].rows[row][ch];
+        rdj_row_t *r = &g_song.patterns[pattern].rows[row][ch];
         if (r->note != RDJ_NOTE_EMPTY && r->note != RDJ_NOTE_OFF) {
             ym2612_rdj_note_on(ch, r->note, r->instrument);
         } else if (r->note == RDJ_NOTE_OFF) {
             ym2612_rdj_note_off(ch);
         }
-        /* CRITICAL: If r->note == RDJ_NOTE_EMPTY (0x00 / '---'), DO NOT call note_off!
-         * Let the previous note sustain naturally.
-         */
+        /* An empty cell (0x00 / '---') must NOT stop the channel; the previous
+         * note sustains until an explicit note-off or a new note arrives. */
     }
 }
 
 void ui_process_playback(void) {
     if (g_tracker_state.is_playing) {
+        uint8_t pat = g_song.order[s_play_order_pos];
+
         if (!s_prev_is_playing) {
             s_prev_is_playing = 1;
             s_tick_counter = 0;
-            s_current_play_row = g_tracker_state.cursor_row;
-            ui_trigger_row_notes(s_current_play_row);
+            s_current_play_row = (g_tracker_state.screen == UI_SCREEN_PAT)
+                                 ? g_tracker_state.cursor_row : 0;
+            ui_trigger_row_notes(pat, s_current_play_row);
         } else {
             s_tick_counter++;
-            uint8_t speed = g_song.patterns[0].speed ? g_song.patterns[0].speed : (g_song.speed ? g_song.speed : 6);
-            if (s_tick_counter >= speed) {
-                s_tick_counter = 0;
-                uint8_t pat_len = g_song.patterns[0].length ? g_song.patterns[0].length : RDJ_MAX_ROWS;
-                s_current_play_row++;
-                if (s_current_play_row >= pat_len) {
-                    s_current_play_row = 0;
+            {
+                uint8_t speed = g_song.patterns[pat].speed ? g_song.patterns[pat].speed
+                                                           : (g_song.speed ? g_song.speed : 6);
+                if (s_tick_counter >= speed) {
+                    s_tick_counter = 0;
+                    {
+                        uint8_t pat_len = g_song.patterns[pat].length ? g_song.patterns[pat].length
+                                                                      : RDJ_MAX_ROWS;
+                        s_current_play_row++;
+                        if (s_current_play_row >= pat_len) {
+                            /* Advance through the order list, wrapping at the end. */
+                            s_current_play_row = 0;
+                            s_play_order_pos++;
+                            if (s_play_order_pos >= g_song.order_length) s_play_order_pos = 0;
+                            pat = g_song.order[s_play_order_pos];
+                        }
+                        g_tracker_state.play_order_pos = s_play_order_pos;
+                        if (g_tracker_state.screen == UI_SCREEN_PAT) {
+                            g_tracker_state.cursor_row = s_current_play_row;
+                        }
+                        ui_trigger_row_notes(pat, s_current_play_row);
+                    }
                 }
-                g_tracker_state.cursor_row = s_current_play_row;
-                ui_trigger_row_notes(s_current_play_row);
             }
         }
     } else {
@@ -442,25 +632,29 @@ void ui_process_playback(void) {
 }
 
 void ui_init(void) {
-    int r, c;
+    int r, c, p;
 
     /* Initialize song and default pattern data */
     g_song.bpm = 130;
     g_song.speed = 6;
     g_song.order_length = 1;
-    g_song.order[0] = 0;
-
-    for (r = 0; r < RDJ_MAX_ROWS; r++) {
-        for (c = 0; c < RDJ_MAX_CHANNELS; c++) {
-            g_song.patterns[0].rows[r][c].note = RDJ_NOTE_EMPTY;
-            g_song.patterns[0].rows[r][c].instrument = 0;
-            g_song.patterns[0].rows[r][c].volume = 0;
-            g_song.patterns[0].rows[r][c].fx_cmd = 0;
-            g_song.patterns[0].rows[r][c].fx_val = 0;
-        }
+    for (p = 0; p < RDJ_MAX_PATTERNS; p++) {
+        g_song.order[p] = (uint8_t)p;
     }
-    g_song.patterns[0].length = 64;
-    g_song.patterns[0].speed = 6;
+
+    for (p = 0; p < RDJ_MAX_PATTERNS; p++) {
+        for (r = 0; r < RDJ_MAX_ROWS; r++) {
+            for (c = 0; c < RDJ_MAX_CHANNELS; c++) {
+                g_song.patterns[p].rows[r][c].note = RDJ_NOTE_EMPTY;
+                g_song.patterns[p].rows[r][c].instrument = 0;
+                g_song.patterns[p].rows[r][c].volume = 0;
+                g_song.patterns[p].rows[r][c].fx_cmd = 0;
+                g_song.patterns[p].rows[r][c].fx_val = 0;
+            }
+        }
+        g_song.patterns[p].length = 64;
+        g_song.patterns[p].speed = 6;
+    }
 
     /* Audition/edit notes through the YM2612 driver. */
     g_song.driver = &ym2612_driver;
@@ -470,6 +664,7 @@ void ui_init(void) {
     s_tick_counter = 0;
     s_current_play_row = 0;
     s_prev_is_playing = 0;
+    s_play_order_pos = 0;
 
 #if defined(RDJ_GENESIS_HARDWARE) || defined(SGDK_GCC) || defined(__m68k__)
     VDP_setScreenWidth320();
@@ -477,10 +672,12 @@ void ui_init(void) {
     ui_palette_init();
     ui_load_custom_tiles();
     ui_clear_bg_b();
+#endif
 
-    /* Prepare FM Synth Patch on slot 0 */
+    /* Seed a few instrument slots with usable FM voices so the patch editor
+     * has something to tweak out of the box. */
     {
-        ym2612_patch_test_t bass_patch = {
+        ym2612_patch_t bass_patch = {
             .ops = {
                 { 0x31, 0x00, 0x1F, 0x05, 0x02, 0x14, 0x00 }, /* Op 1 */
                 { 0x01, 0x24, 0x1F, 0x08, 0x05, 0x24, 0x00 }, /* Op 2 */
@@ -490,9 +687,19 @@ void ui_init(void) {
             .FB_ALG = 0x04,
             .LR_AMS_PMS = 0xC0
         };
+        ym2612_patch_t lead_patch = {
+            .ops = {
+                { 0x71, 0x18, 0x1F, 0x0C, 0x06, 0x24, 0x00 },
+                { 0x31, 0x00, 0x1F, 0x0A, 0x04, 0x14, 0x00 },
+                { 0x01, 0x28, 0x1F, 0x0E, 0x08, 0x24, 0x00 },
+                { 0x01, 0x00, 0x1F, 0x08, 0x02, 0x14, 0x00 }
+            },
+            .FB_ALG = 0x22,
+            .LR_AMS_PMS = 0xC0
+        };
         ym2612_rdj_set_patch(0, &bass_patch);
+        ym2612_rdj_set_patch(1, &lead_patch);
     }
-#endif
 }
 
 void ui_update(void) {
@@ -514,11 +721,27 @@ void ui_render(void) {
     dirty = (g_tracker_state.cursor_row != s_prev_cr) ||
             (g_tracker_state.cursor_channel != s_prev_cc) ||
             (g_tracker_state.is_playing != s_prev_play) ||
-            (s_current_play_row != s_prev_pr);
+            (s_current_play_row != s_prev_pr) ||
+            (g_tracker_state.screen != s_prev_screen) ||
+            (g_tracker_state.sidebar_focus != s_prev_focus) ||
+            (g_tracker_state.sidebar_tab != s_prev_tab) ||
+            (g_tracker_state.song_cursor != s_prev_songcur) ||
+            (g_tracker_state.patch_slot != s_prev_patchslot) ||
+            (g_tracker_state.patch_row != s_prev_patchrow) ||
+            (g_tracker_state.patch_op != s_prev_patchop) ||
+            (g_tracker_state.edit_pattern != s_prev_editpat);
     s_prev_cr = g_tracker_state.cursor_row;
     s_prev_cc = g_tracker_state.cursor_channel;
     s_prev_play = g_tracker_state.is_playing;
     s_prev_pr = s_current_play_row;
+    s_prev_screen = g_tracker_state.screen;
+    s_prev_focus = g_tracker_state.sidebar_focus;
+    s_prev_tab = g_tracker_state.sidebar_tab;
+    s_prev_songcur = g_tracker_state.song_cursor;
+    s_prev_patchslot = g_tracker_state.patch_slot;
+    s_prev_patchrow = g_tracker_state.patch_row;
+    s_prev_patchop = g_tracker_state.patch_op;
+    s_prev_editpat = g_tracker_state.edit_pattern;
 
     s_frame++;
     if (!dirty && ((s_frame & 7) != 0)) { ui_update_highlight(); return; }
@@ -527,10 +750,7 @@ void ui_render(void) {
         s_screen[i] = TILE_FONT_INDEX;    /* blank cell (ink off) */
     }
 
-    ui_build_header();
-    ui_build_grid();
-    ui_build_hud();
-    ui_build_footer();
+    ui_build_screen();
 
     /* DMA the whole tilemap during VBlank; s_screen is static so the queued
      * transfer stays valid until SYS_doVBlankProcess() flushes it. */

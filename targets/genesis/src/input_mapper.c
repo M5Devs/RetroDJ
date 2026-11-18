@@ -2,6 +2,7 @@
 /* GPLv3 - RetroDJ Project */
 
 #include "input_mapper.h"
+#include "core/rdj_ym2612.h"
 
 /* The YM2612 entry points are only a fallback for songs with no bound driver
  * (see audition_note_on/off below). */
@@ -61,54 +62,94 @@ static uint8_t audition_pitch(const input_tracker_state_t *state,
     return (uint8_t)(state->octave * 12 + 12);
 }
 
-void input_mapper_init(input_tracker_state_t *state) {
-    if (!state) return;
-    state->cursor_row = 0;
-    state->cursor_channel = 0;
-    state->cursor_subcol = RDJ_SUBCOL_NOTE;
-    state->octave = 4;
-    state->is_playing = 0;
-    state->last_joy = 0;
-    s_audition_chan = 0xFF;
+/* ---- screen helpers ---- */
+static uint8_t next_screen(uint8_t s) { return (uint8_t)((s + 1) % UI_NUM_SCREENS); }
+static uint8_t prev_screen(uint8_t s) { return (uint8_t)((s + UI_NUM_SCREENS - 1) % UI_NUM_SCREENS); }
+
+/* Channel the patch editor programmes and auditions on. */
+#define PATCH_AUD_CH 0
+
+static int clamp_int(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }
 
-void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_t joy_state) {
-    uint16_t pressed;
-    bool btn_a;
-    bool btn_b;
-    rdj_row_t *cell;
+/* Apply one increment/decrement to the parameter selected in the patch editor,
+ * then push the whole voice to the chip so the change is audible immediately. */
+static void patch_step(input_tracker_state_t *state, int delta) {
+    ym2612_patch_t *p = ym2612_rdj_get_patch(state->patch_slot);
+    ym2612_operator_t *o;
 
-    if (!state || !song) return;
+    if (!p) return;
+    o = &p->ops[state->patch_op & 0x03];
 
-    pressed = joy_state & ~state->last_joy;
-    btn_a = (joy_state & BUTTON_A) != 0;
-    btn_b = (joy_state & BUTTON_B) != 0;
-    cell = &song->patterns[0].rows[state->cursor_row][state->cursor_channel];
+    switch (state->patch_row) {
+        case UI_PATCH_ROW_ALGO: {
+            int a = clamp_int((p->FB_ALG & 0x07) + delta, 0, 7);
+            p->FB_ALG = (uint8_t)((p->FB_ALG & 0x38) | a);
+            break;
+        }
+        case UI_PATCH_ROW_FB: {
+            int f = clamp_int(((p->FB_ALG >> 3) & 0x07) + delta, 0, 7);
+            p->FB_ALG = (uint8_t)((p->FB_ALG & 0x07) | (f << 3));
+            break;
+        }
+        case UI_PATCH_ROW_PAN: {
+            /* Cycle the L/R stereo bits: L -> R -> both -> L. */
+            uint8_t pan = (uint8_t)(p->LR_AMS_PMS & 0xC0);
+            if (delta > 0) {
+                if (pan == 0x80) pan = 0x40;
+                else if (pan == 0x40) pan = 0xC0;
+                else pan = 0x80;
+            } else {
+                if (pan == 0x80) pan = 0xC0;
+                else if (pan == 0xC0) pan = 0x40;
+                else pan = 0x80;
+            }
+            p->LR_AMS_PMS = (uint8_t)((p->LR_AMS_PMS & 0x3F) | pan);
+            break;
+        }
+        case UI_PATCH_ROW_DTMUL: o->DT_MUL  = (uint8_t)clamp_int((int)o->DT_MUL + delta, 0, 255); break;
+        case UI_PATCH_ROW_TL:    o->TL      = (uint8_t)clamp_int((int)o->TL + delta, 0, 127);     break;
+        case UI_PATCH_ROW_AR:    o->AR      = (uint8_t)clamp_int((int)o->AR + delta, 0, 31);      break;
+        case UI_PATCH_ROW_DR:    o->DR      = (uint8_t)clamp_int((int)o->DR + delta, 0, 31);      break;
+        case UI_PATCH_ROW_SR:    o->SR      = (uint8_t)clamp_int((int)o->SR + delta, 0, 31);      break;
+        case UI_PATCH_ROW_SLRR:  o->SL_RR   = (uint8_t)clamp_int((int)o->SL_RR + delta, 0, 255);  break;
+        case UI_PATCH_ROW_SSG:   o->SSG_EG  = (uint8_t)clamp_int((int)o->SSG_EG + delta, 0, 15);  break;
+        default: break;
+    }
 
-    /* BUTTON_B + BUTTON_A combo: Clear current cell */
+    ym2612_rdj_apply_patch(PATCH_AUD_CH, p);
+}
+
+/* ---- pattern editor input (with cursor-walk into the sidebar tabs) ---- */
+static void handle_pat(input_tracker_state_t *state, rdj_song_t *song,
+                       uint16_t pressed, bool btn_a, bool btn_b) {
+    rdj_row_t *cell = &song->patterns[state->edit_pattern].rows[state->cursor_row]
+                                                        [state->cursor_channel];
+
+    if (state->sidebar_focus) {
+        if (pressed & BUTTON_UP)   { if (state->sidebar_tab > 0) state->sidebar_tab--; }
+        if (pressed & BUTTON_DOWN) { if (state->sidebar_tab < UI_NUM_SCREENS - 1) state->sidebar_tab++; }
+        if (pressed & BUTTON_LEFT) { state->sidebar_focus = 0; }
+        if (btn_a && !btn_b)       { state->screen = state->sidebar_tab; state->sidebar_focus = 0; }
+        return;
+    }
+
+    /* B + A combo: clear current cell */
     if ((btn_b && (pressed & BUTTON_A)) || (btn_a && (pressed & BUTTON_B))) {
         cell->note = RDJ_NOTE_EMPTY;
         cell->instrument = 0;
         cell->volume = 0;
         cell->fx_cmd = 0;
         cell->fx_val = 0;
-        state->last_joy = joy_state;
         return;
     }
 
-    /* BUTTON_START: Toggle playback */
-    if (pressed & BUTTON_START) {
-        state->is_playing = !state->is_playing;
-    }
-
-    /* Note editing: BUTTON_A + Direction transposes the cell, auditioning the
-     * result immediately (the LSDj workflow). A and B are handled as distinct
-     * branches so the A path stays reachable on pads that have no C button. */
     if (btn_a && !btn_b) {
         uint8_t before = cell->note;
 
-        /* BUTTON_A + UP/DOWN: Transpose note by +/- 1 semitone */
-        /* BUTTON_A + LEFT/RIGHT: Transpose note by +/- 1 octave (12 semitones) */
         if (pressed & BUTTON_UP) {
             if (cell->note == RDJ_NOTE_EMPTY) cell->note = state->octave * 12 + 12;
             else if (cell->note < 127) cell->note++;
@@ -129,17 +170,12 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
         }
 
         if (cell->note != before) {
-            /* Note changed: audition it. */
-            audition_note_on_held(song, state->cursor_channel, cell->note,
-                                  cell->instrument);
+            audition_note_on_held(song, state->cursor_channel, cell->note, cell->instrument);
         } else if ((pressed & BUTTON_A) && state->cursor_subcol == RDJ_SUBCOL_NOTE) {
-            /* Plain A tap on the note column: audition without editing. */
             audition_note_on_held(song, state->cursor_channel,
                                   audition_pitch(state, cell), cell->instrument);
         }
     } else if (btn_b && !btn_a) {
-        /* BUTTON_B + UP/DOWN: Increment/decrement current value by 1 */
-        /* BUTTON_B + LEFT/RIGHT: Increment/decrement current value by 16 (0x10) */
         int delta = 0;
 
         if (pressed & BUTTON_UP) delta = 1;
@@ -156,8 +192,7 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
                     if (new_note < 1) new_note = 1;
                     if (new_note > 127) new_note = 127;
                     cell->note = (uint8_t)new_note;
-                    audition_note_on_held(song, state->cursor_channel, cell->note,
-                                          cell->instrument);
+                    audition_note_on_held(song, state->cursor_channel, cell->note, cell->instrument);
                     break;
                 }
                 case RDJ_SUBCOL_INST: {
@@ -183,12 +218,10 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
                 }
             }
         } else if ((pressed & BUTTON_B) && state->cursor_subcol == RDJ_SUBCOL_NOTE) {
-            /* Plain B tap on the note column: audition (pads without a C button). */
             audition_note_on_held(song, state->cursor_channel,
                                   audition_pitch(state, cell), cell->instrument);
         }
     } else if (!btn_a && !btn_b) {
-        /* Normal Cursor Navigation */
         if (pressed & BUTTON_UP) {
             if (state->cursor_row > 0) state->cursor_row--;
             else state->cursor_row = RDJ_MAX_ROWS - 1;
@@ -211,22 +244,158 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
             } else if (state->cursor_channel < RDJ_MAX_CHANNELS - 1) {
                 state->cursor_channel++;
                 state->cursor_subcol = 0;
+            } else {
+                /* Walk past FM6 into the sidebar tab column. */
+                state->sidebar_focus = 1;
+                state->sidebar_tab = UI_TAB_PAT;
             }
         }
+    }
+}
+
+/* ---- song playlist input ---- */
+static void handle_song(input_tracker_state_t *state, rdj_song_t *song,
+                        uint16_t pressed, bool btn_a, bool btn_b) {
+    uint8_t slot = state->song_cursor;
+
+    if (btn_a && !btn_b) {
+        /* A + UP/DOWN: change the pattern assigned to the selected slot. */
+        if (pressed & BUTTON_UP) {
+            song->order[slot] = (uint8_t)((song->order[slot] + 1) % RDJ_MAX_PATTERNS);
+        }
+        if (pressed & BUTTON_DOWN) {
+            song->order[slot] = (uint8_t)((song->order[slot] + RDJ_MAX_PATTERNS - 1) % RDJ_MAX_PATTERNS);
+        }
+        /* A + LEFT/RIGHT: open the selected slot's pattern in the PAT editor. */
+        if (pressed & (BUTTON_LEFT | BUTTON_RIGHT)) {
+            state->edit_pattern = song->order[slot];
+            state->cursor_row = 0;
+            state->screen = UI_SCREEN_PAT;
+        }
+    } else if (btn_b && !btn_a) {
+        /* B + UP/DOWN: adjust the order length. */
+        if ((pressed & BUTTON_UP) && song->order_length < RDJ_MAX_PATTERNS) song->order_length++;
+        if ((pressed & BUTTON_DOWN) && song->order_length > 1) song->order_length--;
+        if (state->song_cursor >= song->order_length) {
+            state->song_cursor = (uint8_t)(song->order_length - 1);
+        }
+    } else if (!btn_a && !btn_b) {
+        if ((pressed & BUTTON_UP) && state->song_cursor > 0) state->song_cursor--;
+        if ((pressed & BUTTON_DOWN) && state->song_cursor < RDJ_MAX_PATTERNS - 1) state->song_cursor++;
+    }
+}
+
+/* ---- patch editor input ---- */
+static void handle_patch(input_tracker_state_t *state, rdj_song_t *song,
+                         uint16_t pressed, bool btn_a, bool btn_b) {
+    if (btn_a && !btn_b) {
+        /* A + LEFT/RIGHT: switch instrument slot. */
+        if (pressed & BUTTON_LEFT) {
+            if (state->patch_slot > 0) state->patch_slot--;
+        }
+        if (pressed & BUTTON_RIGHT) {
+            if (state->patch_slot < YM2612_MAX_PATCHES - 1) state->patch_slot++;
+        }
+        /* A tap (no direction): audition the patch. */
+        if (!(pressed & (BUTTON_LEFT | BUTTON_RIGHT | BUTTON_UP | BUTTON_DOWN))) {
+            audition_note_on_held(song, PATCH_AUD_CH, (uint8_t)(state->octave * 12 + 12),
+                                  state->patch_slot);
+        }
+    } else if (btn_b && !btn_a) {
+        int delta = 0;
+        if (pressed & BUTTON_UP) delta = 1;
+        if (pressed & BUTTON_DOWN) delta = -1;
+        if (delta != 0) patch_step(state, delta);
+    } else if (!btn_a && !btn_b) {
+        if ((pressed & BUTTON_UP) && state->patch_row > 0) state->patch_row--;
+        if ((pressed & BUTTON_DOWN) && state->patch_row < UI_PATCH_NUM_ROWS - 1) state->patch_row++;
+        if ((pressed & BUTTON_LEFT) && state->patch_op > 0) state->patch_op--;
+        if ((pressed & BUTTON_RIGHT) && state->patch_op < 3) state->patch_op++;
+    }
+}
+
+void input_mapper_init(input_tracker_state_t *state) {
+    if (!state) return;
+    state->cursor_row = 0;
+    state->cursor_channel = 0;
+    state->cursor_subcol = RDJ_SUBCOL_NOTE;
+    state->octave = 4;
+    state->is_playing = 0;
+    state->last_joy = 0;
+
+    state->screen = UI_SCREEN_PAT;
+    state->sidebar_focus = 0;
+    state->sidebar_tab = UI_TAB_PAT;
+    state->song_cursor = 0;
+    state->play_order_pos = 0;
+    state->edit_pattern = 0;
+    state->patch_slot = 0;
+    state->patch_row = 0;
+    state->patch_op = 0;
+    state->start_consumed = 0;
+
+    s_audition_chan = 0xFF;
+}
+
+void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_t joy_state) {
+    uint16_t pressed;
+    bool btn_a;
+    bool btn_b;
+
+    if (!state || !song) return;
+
+    pressed = joy_state & ~state->last_joy;
+    btn_a = (joy_state & BUTTON_A) != 0;
+    btn_b = (joy_state & BUTTON_B) != 0;
+
+    /* ---- Shortcut mode: START + LEFT/RIGHT cycles the active screen ---- */
+    if ((joy_state & BUTTON_START) && (pressed & (BUTTON_LEFT | BUTTON_RIGHT))) {
+        state->screen = (pressed & BUTTON_RIGHT) ? next_screen(state->screen)
+                                                 : prev_screen(state->screen);
+        state->start_consumed = 1;
+        state->sidebar_focus = 0;
+        state->sidebar_tab = state->screen;
+    }
+    /* 6-button pads: MODE cycles the screen on its own. */
+    if (pressed & BUTTON_MODE) {
+        state->screen = next_screen(state->screen);
+        state->sidebar_focus = 0;
+        state->sidebar_tab = state->screen;
+    }
+
+    /* ---- START alone (no direction while held): toggle Play/Stop on release ---- */
+    if (!(joy_state & BUTTON_START) && (state->last_joy & BUTTON_START)) {
+        if (!state->start_consumed) state->is_playing = !state->is_playing;
+        state->start_consumed = 0;
+    }
+    if (!(joy_state & BUTTON_START) && !(state->last_joy & BUTTON_START)) {
+        state->start_consumed = 0;
+    }
+
+    /* ---- Per-screen editing ---- */
+    switch (state->screen) {
+        case UI_SCREEN_SONG:  handle_song(state, song, pressed, btn_a, btn_b);  break;
+        case UI_SCREEN_PATCH: handle_patch(state, song, pressed, btn_a, btn_b); break;
+        default:              handle_pat(state, song, pressed, btn_a, btn_b);   break;
     }
 
     /* BUTTON_C (Genesis only): audition while held. */
     if (pressed & BUTTON_C) {
-        audition_note_on_held(song, state->cursor_channel,
-                              audition_pitch(state, cell), cell->instrument);
+        uint8_t ch = (state->screen == UI_SCREEN_PATCH) ? PATCH_AUD_CH : state->cursor_channel;
+        uint8_t inst = (state->screen == UI_SCREEN_PATCH) ? state->patch_slot
+                                                          : song->patterns[state->edit_pattern]
+                                                                 .rows[state->cursor_row][state->cursor_channel].instrument;
+        uint8_t note = (state->screen == UI_SCREEN_PATCH)
+                       ? (uint8_t)(state->octave * 12 + 12)
+                       : audition_pitch(state, &song->patterns[state->edit_pattern]
+                                                      .rows[state->cursor_row][state->cursor_channel]);
+        audition_note_on_held(song, ch, note, inst);
     } else if ((state->last_joy & BUTTON_C) && !(joy_state & BUTTON_C)) {
-        audition_note_off(song, state->cursor_channel);
+        audition_note_off(song, s_audition_chan == 0xFF ? state->cursor_channel : s_audition_chan);
         s_audition_chan = 0xFF;
     }
 
-    /* Release an A/B audition once the held button comes back up. BUTTON_C is
-     * excluded: the Genesis C button auditions for as long as it is held and is
-     * released by the block above, so it must not be cut while still down. */
+    /* Release an A/B/C audition once the held button comes back up. */
     if (s_audition_chan != 0xFF &&
         !(joy_state & (BUTTON_A | BUTTON_B | BUTTON_C))) {
         audition_note_off(song, s_audition_chan);

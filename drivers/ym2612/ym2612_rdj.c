@@ -28,34 +28,10 @@
 
 #include "core/rdj_driver.h"
 #include "core/rdj_backend.h"
+#include "core/rdj_ym2612.h"
 
 #define YM2612_NUM_CHANNELS 6
-#define YM2612_NUM_PATTERNS 32
-
-/* Required structs from task specification */
-typedef struct {
-    uint8_t DT_MUL;   /* Detune / Multiple */
-    uint8_t TL;       /* Total Level */
-    uint8_t AR;       /* Attack Rate */
-    uint8_t DR;       /* Decay Rate */
-    uint8_t SR;       /* Sustain Rate */
-    uint8_t SL_RR;    /* Sustain Level / Release Rate */
-    uint8_t SSG_EG;   /* SSG-EG */
-} ym2612_operator_t;
-
-typedef struct {
-    ym2612_operator_t ops[4];
-    uint8_t FB_ALG;   /* Feedback / Algorithm */
-    uint8_t LR_AMS_PMS;
-} ym2612_patch_t;
-
-/* Forward Declarations */
-void ym2612_rdj_init(uint32_t clock);
-void ym2612_rdj_reset(void);
-void ym2612_rdj_write(uint8_t port, uint8_t reg, uint8_t val);
-void ym2612_rdj_note_on(uint8_t channel, uint8_t note, uint8_t instrument);
-void ym2612_rdj_note_off(uint8_t channel);
-void ym2612_rdj_set_patch(uint8_t inst_slot, ym2612_patch_t *patch);
+#define YM2612_NUM_PATTERNS YM2612_MAX_PATCHES
 
 void ym2612_rdj_write(uint8_t port, uint8_t reg, uint8_t val) {
     if (rdj_active_backend && rdj_active_backend->write_ym2612) {
@@ -93,7 +69,7 @@ static const uint16_t ym_fnum_table[12] = {
 };
 
 /* Internal patch bank stored without dynamic allocation */
-static ym2612_patch_t patch_bank[32];
+static ym2612_patch_t patch_bank[YM2612_MAX_PATCHES];
 static uint32_t current_clock = 7670454; /* Default Sega Genesis YM2612 NTSC clock ~7.67 MHz */
 
 /* Port offset helper: Part 1 = port 0, Part 2 = port 1 */
@@ -123,7 +99,7 @@ void ym2612_rdj_reset(void) {
     }
 
     /* Clear patch memory */
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < YM2612_MAX_PATCHES; i++) {
         for (int op = 0; op < 4; op++) {
             patch_bank[i].ops[op].DT_MUL = 0;
             patch_bank[i].ops[op].TL = 0x7F; /* Silent level */
@@ -138,9 +114,55 @@ void ym2612_rdj_reset(void) {
     }
 }
 
-void ym2612_rdj_set_patch(uint8_t inst_slot, ym2612_patch_t *patch) {
-    if (inst_slot < 32 && patch != NULL) {
+ym2612_patch_t *ym2612_rdj_get_patch(uint8_t slot) {
+    if (slot >= YM2612_MAX_PATCHES) return NULL;
+    return &patch_bank[slot];
+}
+
+void ym2612_rdj_set_patch(uint8_t inst_slot, const ym2612_patch_t *patch) {
+    if (inst_slot < YM2612_MAX_PATCHES && patch != NULL) {
         patch_bank[inst_slot] = *patch;
+    }
+}
+
+/* Write every operator and channel register of a patch to one FM channel. The
+ * caller is responsible for keying the note; this only programmes the voice so
+ * it can be reused for both note-on and live patch-editor updates. */
+void ym2612_rdj_apply_patch(uint8_t channel, const ym2612_patch_t *p) {
+    uint8_t port, ch_off, op;
+
+    if (channel >= YM2612_NUM_CHANNELS || p == NULL) return;
+
+    port = get_port(channel);
+    ch_off = get_channel_offset(channel);
+
+    /* Program algorithm and feedback (0xB0) */
+    /* Bits[5:3] = Feedback, Bits[2:0] = Algorithm */
+    ym2612_rdj_write(port, REG_ALG_FEEDBACK + ch_off, p->FB_ALG);
+
+    /* Program LR panning and LFO AMS/PMS (0xB4) */
+    /* Bits[7:6] = L/R Pan, Bits[5:4] = AMS, Bits[2:0] = PMS */
+    ym2612_rdj_write(port, REG_LR_AMS_PMS + ch_off, p->LR_AMS_PMS);
+
+    /* Program 4 operators per channel */
+    for (op = 0; op < 4; op++) {
+        uint8_t op_reg = op_offsets[op] + ch_off;
+        const ym2612_operator_t *o = &p->ops[op];
+
+        /* REG_DETUNE_MULT (0x30): Bits[6:4] = DT, Bits[3:0] = MUL */
+        ym2612_rdj_write(port, REG_DETUNE_MULT + op_reg, o->DT_MUL);
+        /* REG_TOTAL_LEVEL (0x40): Bits[6:0] = Total Level (volume attenuation) */
+        ym2612_rdj_write(port, REG_TOTAL_LEVEL + op_reg, o->TL);
+        /* REG_ATTACK_KS (0x50): Bits[7:6] = KS, Bits[4:0] = AR */
+        ym2612_rdj_write(port, REG_ATTACK_KS + op_reg, o->AR);
+        /* REG_DECAY_AM (0x60): Bit[7] = AM, Bits[4:0] = DR */
+        ym2612_rdj_write(port, REG_DECAY_AM + op_reg, o->DR);
+        /* REG_SUSTAIN_RATE (0x70): Bits[4:0] = SR */
+        ym2612_rdj_write(port, REG_SUSTAIN_RATE + op_reg, o->SR);
+        /* REG_SUSTAIN_REL (0x80): Bits[7:4] = SL, Bits[3:0] = RR */
+        ym2612_rdj_write(port, REG_SUSTAIN_REL + op_reg, o->SL_RR);
+        /* REG_SSG_EG (0x90): Bits[3:0] = SSG-EG control */
+        ym2612_rdj_write(port, REG_SSG_EG + op_reg, o->SSG_EG);
     }
 }
 
@@ -148,39 +170,8 @@ void ym2612_rdj_note_on(uint8_t channel, uint8_t note, uint8_t instrument) {
     if (channel >= YM2612_NUM_CHANNELS) return;
 
     /* Apply patch parameters if valid instrument slot */
-    if (instrument < 32) {
-        ym2612_patch_t *p = &patch_bank[instrument];
-        uint8_t port = get_port(channel);
-        uint8_t ch_off = get_channel_offset(channel);
-
-        /* Program algorithm and feedback (0xB0) */
-        /* Bits[5:3] = Feedback, Bits[2:0] = Algorithm */
-        ym2612_rdj_write(port, REG_ALG_FEEDBACK + ch_off, p->FB_ALG);
-
-        /* Program LR panning and LFO AMS/PMS (0xB4) */
-        /* Bits[7:6] = L/R Pan, Bits[5:4] = AMS, Bits[2:0] = PMS */
-        ym2612_rdj_write(port, REG_LR_AMS_PMS + ch_off, p->LR_AMS_PMS);
-
-        /* Program 4 operators per channel */
-        for (uint8_t op = 0; op < 4; op++) {
-            uint8_t op_reg = op_offsets[op] + ch_off;
-            ym2612_operator_t *o = &p->ops[op];
-
-            /* REG_DETUNE_MULT (0x30): Bits[6:4] = DT, Bits[3:0] = MUL */
-            ym2612_rdj_write(port, REG_DETUNE_MULT + op_reg, o->DT_MUL);
-            /* REG_TOTAL_LEVEL (0x40): Bits[6:0] = Total Level (volume attenuation) */
-            ym2612_rdj_write(port, REG_TOTAL_LEVEL + op_reg, o->TL);
-            /* REG_ATTACK_KS (0x50): Bits[7:6] = KS, Bits[4:0] = AR */
-            ym2612_rdj_write(port, REG_ATTACK_KS + op_reg, o->AR);
-            /* REG_DECAY_AM (0x60): Bit[7] = AM, Bits[4:0] = DR */
-            ym2612_rdj_write(port, REG_DECAY_AM + op_reg, o->DR);
-            /* REG_SUSTAIN_RATE (0x70): Bits[4:0] = SR */
-            ym2612_rdj_write(port, REG_SUSTAIN_RATE + op_reg, o->SR);
-            /* REG_SUSTAIN_REL (0x80): Bits[7:4] = SL, Bits[3:0] = RR */
-            ym2612_rdj_write(port, REG_SUSTAIN_REL + op_reg, o->SL_RR);
-            /* REG_SSG_EG (0x90): Bits[3:0] = SSG-EG control */
-            ym2612_rdj_write(port, REG_SSG_EG + op_reg, o->SSG_EG);
-        }
+    if (instrument < YM2612_MAX_PATCHES) {
+        ym2612_rdj_apply_patch(channel, &patch_bank[instrument]);
     }
 
     /* Calculate Octave Block and FNUM from MIDI note */
