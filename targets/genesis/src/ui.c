@@ -661,6 +661,15 @@ void ui_init(void) {
 
     input_mapper_init(&g_tracker_state);
 
+    /* Route the [PATCH] editor at the real YM2612 driver. */
+    {
+        static const input_mapper_patch_ops_t patch_ops = {
+            ym2612_rdj_get_patch,
+            ym2612_rdj_apply_patch
+        };
+        input_mapper_set_patch_ops(&patch_ops);
+    }
+
     s_tick_counter = 0;
     s_current_play_row = 0;
     s_prev_is_playing = 0;

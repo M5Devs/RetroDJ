@@ -28,6 +28,7 @@
 #endif
 
 #include "core/sequencer.h"
+#include "core/rdj_ym2612.h"
 
 #define RDJ_SUBCOL_NOTE 0
 #define RDJ_SUBCOL_INST 1
@@ -94,5 +95,16 @@ typedef struct {
 
 void input_mapper_init(input_tracker_state_t *state);
 void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_t joy_state);
+
+/* Optional FM patch backend. The [PATCH] screen drives the YM2612 through this
+ * hook so the mapper can be linked on targets that ship no YM2612 driver (NES,
+ * SMS, Game Boy): those install nothing and patch edits are silently ignored.
+ * A platform that has the driver calls this once with the real accessors. */
+typedef struct {
+    ym2612_patch_t *(*get_patch)(uint8_t slot);
+    void (*apply_patch)(uint8_t channel, const ym2612_patch_t *patch);
+} input_mapper_patch_ops_t;
+
+void input_mapper_set_patch_ops(const input_mapper_patch_ops_t *ops);
 
 #endif

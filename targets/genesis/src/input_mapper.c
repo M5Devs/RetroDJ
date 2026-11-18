@@ -2,7 +2,6 @@
 /* GPLv3 - RetroDJ Project */
 
 #include "input_mapper.h"
-#include "core/rdj_ym2612.h"
 
 /* The YM2612 entry points are only a fallback for songs with no bound driver
  * (see audition_note_on/off below). */
@@ -10,6 +9,23 @@
 extern void ym2612_rdj_note_on(uint8_t channel, uint8_t note, uint8_t instrument);
 extern void ym2612_rdj_note_off(uint8_t channel);
 #endif
+
+/* FM patch access is routed through a platform-installed hook so this file
+ * links on targets that have no YM2612 driver (see input_mapper.h). */
+static input_mapper_patch_ops_t s_patch_ops;
+
+void input_mapper_set_patch_ops(const input_mapper_patch_ops_t *ops) {
+    if (ops) s_patch_ops = *ops;
+    else { s_patch_ops.get_patch = NULL; s_patch_ops.apply_patch = NULL; }
+}
+
+static ym2612_patch_t *patch_get(uint8_t slot) {
+    return s_patch_ops.get_patch ? s_patch_ops.get_patch(slot) : NULL;
+}
+
+static void patch_apply(uint8_t channel, const ym2612_patch_t *patch) {
+    if (s_patch_ops.apply_patch) s_patch_ops.apply_patch(channel, patch);
+}
 
 /* Audition through whichever sound driver the song is bound to, so the same
  * input code previews notes on the YM2612, the NES 2A03 and the Game Boy APU
@@ -78,7 +94,7 @@ static int clamp_int(int v, int lo, int hi) {
 /* Apply one increment/decrement to the parameter selected in the patch editor,
  * then push the whole voice to the chip so the change is audible immediately. */
 static void patch_step(input_tracker_state_t *state, int delta) {
-    ym2612_patch_t *p = ym2612_rdj_get_patch(state->patch_slot);
+    ym2612_patch_t *p = patch_get(state->patch_slot);
     ym2612_operator_t *o;
 
     if (!p) return;
@@ -120,7 +136,7 @@ static void patch_step(input_tracker_state_t *state, int delta) {
         default: break;
     }
 
-    ym2612_rdj_apply_patch(PATCH_AUD_CH, p);
+    patch_apply(PATCH_AUD_CH, p);
 }
 
 /* ---- pattern editor input (with cursor-walk into the sidebar tabs) ---- */
