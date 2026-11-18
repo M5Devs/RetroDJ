@@ -7,6 +7,8 @@ on:
       - 'targets/gameboy/**'
       - 'backends/**'
       - 'core/**'
+      - 'targets/genesis/src/input_mapper.c'
+      - 'targets/genesis/src/input_mapper.h'
       - 'drivers/gb_sound/**'
       - '.github/workflows/build-gameboy.yml'
   pull_request:
@@ -15,6 +17,8 @@ on:
       - 'targets/gameboy/**'
       - 'backends/**'
       - 'core/**'
+      - 'targets/genesis/src/input_mapper.c'
+      - 'targets/genesis/src/input_mapper.h'
       - 'drivers/gb_sound/**'
       - '.github/workflows/build-gameboy.yml'
   workflow_dispatch:

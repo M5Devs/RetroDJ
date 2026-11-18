@@ -7,6 +7,8 @@ on:
       - 'targets/nes/**'
       - 'backends/**'
       - 'core/**'
+      - 'targets/genesis/src/input_mapper.c'
+      - 'targets/genesis/src/input_mapper.h'
       - 'drivers/nes_2a03/**'
       - '.github/workflows/build-nes.yml'
   pull_request:
@@ -15,6 +17,8 @@ on:
       - 'targets/nes/**'
       - 'backends/**'
       - 'core/**'
+      - 'targets/genesis/src/input_mapper.c'
+      - 'targets/genesis/src/input_mapper.h'
       - 'drivers/nes_2a03/**'
       - '.github/workflows/build-nes.yml'
   workflow_dispatch:

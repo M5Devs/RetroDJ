@@ -7,6 +7,8 @@ on:
       - 'targets/sms/**'
       - 'backends/**'
       - 'core/**'
+      - 'targets/genesis/src/input_mapper.c'
+      - 'targets/genesis/src/input_mapper.h'
       - 'drivers/sn76489/**'
       - '.github/workflows/build-sms.yml'
   pull_request:
@@ -15,6 +17,8 @@ on:
       - 'targets/sms/**'
       - 'backends/**'
       - 'core/**'
+      - 'targets/genesis/src/input_mapper.c'
+      - 'targets/genesis/src/input_mapper.h'
       - 'drivers/sn76489/**'
       - '.github/workflows/build-sms.yml'
   workflow_dispatch:
