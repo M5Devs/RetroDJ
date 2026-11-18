@@ -10,21 +10,29 @@ extern void ym2612_rdj_note_on(uint8_t channel, uint8_t note, uint8_t instrument
 extern void ym2612_rdj_note_off(uint8_t channel);
 #endif
 
-/* FM patch access is routed through a platform-installed hook so this file
- * links on targets that have no YM2612 driver (see input_mapper.h). */
-static input_mapper_patch_ops_t s_patch_ops;
+/* FM patch access is routed through platform-installed hooks so this file links
+ * on targets that have no YM2612 driver (see input_mapper.h). Kept as plain
+ * function pointers rather than struct members: SDCC miscompiles indirect calls
+ * through a struct field. */
+static ym2612_patch_t *(*s_get_patch)(uint8_t slot);
+static void (*s_apply_patch)(uint8_t channel, const ym2612_patch_t *patch);
 
 void input_mapper_set_patch_ops(const input_mapper_patch_ops_t *ops) {
-    if (ops) s_patch_ops = *ops;
-    else { s_patch_ops.get_patch = NULL; s_patch_ops.apply_patch = NULL; }
+    if (ops) {
+        s_get_patch = ops->get_patch;
+        s_apply_patch = ops->apply_patch;
+    } else {
+        s_get_patch = NULL;
+        s_apply_patch = NULL;
+    }
 }
 
 static ym2612_patch_t *patch_get(uint8_t slot) {
-    return s_patch_ops.get_patch ? s_patch_ops.get_patch(slot) : NULL;
+    return s_get_patch ? s_get_patch(slot) : NULL;
 }
 
 static void patch_apply(uint8_t channel, const ym2612_patch_t *patch) {
-    if (s_patch_ops.apply_patch) s_patch_ops.apply_patch(channel, patch);
+    if (s_apply_patch) s_apply_patch(channel, patch);
 }
 
 /* Audition through whichever sound driver the song is bound to, so the same
