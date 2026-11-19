@@ -30,6 +30,7 @@
 
 #include "core/rdj_driver.h"
 #include "core/rdj_backend.h"
+#include "core/rdj_gb_inst.h"
 
 /* Register map (Game Boy APU hardware registers $FF10 - $FF26) */
 #define GB_NR10 0xFF10  /* CH1 Sweep */
@@ -107,6 +108,33 @@ static const uint8_t gb_default_wave_ram[16] = {
     0xED, 0xCB, 0xA9, 0x87, 0x65, 0x43, 0x21, 0x00
 };
 
+/* Instrument bank edited by the [INST] screen. Slot 0 keeps the historical
+ * default sound (50% duty, full volume, no envelope) so existing songs are
+ * unchanged. */
+static gb_inst_t gb_inst_bank[GB_INST_COUNT];
+static uint8_t  gb_inst_ready = 0;
+
+static void gb_inst_bank_init(void) {
+    uint8_t i;
+    for (i = 0; i < GB_INST_COUNT; i++) {
+        gb_inst_bank[i].channel  = (uint8_t)(i % 3);
+        gb_inst_bank[i].duty     = 2;   /* 50% */
+        gb_inst_bank[i].volume   = 15;
+        gb_inst_bank[i].env_dir  = GB_INST_ENV_DOWN;
+        gb_inst_bank[i].env_pace = 0;
+        gb_inst_bank[i].sweep    = 0;
+        gb_inst_bank[i].wave     = 0;
+        gb_inst_bank[i].noise    = 0;
+    }
+    gb_inst_ready = 1;
+}
+
+gb_inst_t *gb_sound_inst(uint8_t slot) {
+    if (!gb_inst_ready) gb_inst_bank_init();
+    return &gb_inst_bank[slot % GB_INST_COUNT];
+}
+
+
 static uint16_t gb_calc_frequency(uint8_t note) {
     if (note > 127) note = 127;
     return gb_frequency_table[note];
@@ -150,62 +178,89 @@ void gb_sound_rdj_reset(void) {
     }
 }
 
+/* Game Boy envelope register byte: initial volume, direction, pace. `vol_4bit`
+ * is the per-note volume from the pattern, or 0 when the note leaves volume to
+ * the instrument, in which case the instrument's own level is used. */
+static uint8_t gb_env_byte(const gb_inst_t *in, uint8_t vol_4bit) {
+    uint8_t vol = vol_4bit ? vol_4bit : (in ? in->volume : 15);
+    uint8_t dir = in ? in->env_dir : GB_INST_ENV_DOWN;
+    uint8_t pace = in ? in->env_pace : 0;
+    if (vol > 15) vol = 15;
+    /* Pace 0 means "no envelope change", which the APU expresses by holding
+     * the initial volume; a non-zero pace with direction 0 decays. */
+    if (pace == 0) return (uint8_t)(vol << 4);
+    return (uint8_t)((vol << 4) | ((dir ? 1 : 0) << 3) | (pace & 0x07));
+}
+
 void gb_sound_note_on(uint8_t ch, uint8_t note, uint8_t inst, uint8_t vol) {
     uint16_t freq;
     uint8_t vol_4bit;
     uint8_t duty_bits;
-    uint8_t shift_val;
     uint8_t noise_poly;
+    gb_inst_t *in = gb_sound_inst(inst);
 
-    (void)inst;
-    vol_4bit = vol ? (vol >> 3) : 15; /* Map 0..128 -> 0..15 range, default 15 */
+    /* Map the pattern's 0..128 volume into 0..15; 0 means "instrument default",
+     * which gb_env_byte resolves. */
+    vol_4bit = (uint8_t)(vol >> 3);
     if (vol_4bit > 15) vol_4bit = 15;
 
-    if (ch == 0) {
-        /* CH1: Pulse 1 with Sweep */
-        freq = gb_calc_frequency(note);
-        duty_bits = 0x80; /* 50% duty cycle */
+    /* Duty bits live in NRx1 bits 7-6; the instrument's duty is used when the
+     * instrument was explicitly edited, otherwise the 50% default. */
+    duty_bits = (uint8_t)((in->duty & 0x03) << 6);
 
-        gb_sound_rdj_write(GB_NR10, 0x00); /* Disable sweep */
-        gb_sound_rdj_write(GB_NR11, duty_bits); /* Duty cycle + 0 length */
-        gb_sound_rdj_write(GB_NR12, (vol_4bit << 4)); /* Initial volume, envelope stop */
-        gb_sound_rdj_write(GB_NR13, (uint8_t)(freq & 0xFF)); /* Freq low 8 bits */
-        gb_sound_rdj_write(GB_NR14, (uint8_t)(0x80 | ((freq >> 8) & 0x07))); /* Trigger (bit 7) + Freq high 3 bits */
+    if (ch == 0) {
+        /* CH1: Pulse 1 with frequency sweep (NR10). */
+        freq = gb_calc_frequency(note);
+        /* NR10: pace in bits 6-4, direction up (0x08) so sweep raises pitch,
+         * shift 0 keeps the step gentle. */
+        gb_sound_rdj_write(GB_NR10, in->sweep ? (uint8_t)(((in->sweep & 0x07) << 4) | 0x08) : 0x00);
+        gb_sound_rdj_write(GB_NR11, duty_bits);
+        gb_sound_rdj_write(GB_NR12, gb_env_byte(in, vol_4bit));
+        gb_sound_rdj_write(GB_NR13, (uint8_t)(freq & 0xFF));
+        gb_sound_rdj_write(GB_NR14, (uint8_t)(0x80 | ((freq >> 8) & 0x07)));
     }
     else if (ch == 1) {
         /* CH2: Pulse 2 */
         freq = gb_calc_frequency(note);
-        duty_bits = 0x80; /* 50% duty cycle */
-
         gb_sound_rdj_write(GB_NR21, duty_bits);
-        gb_sound_rdj_write(GB_NR22, (vol_4bit << 4));
+        gb_sound_rdj_write(GB_NR22, gb_env_byte(in, vol_4bit));
         gb_sound_rdj_write(GB_NR23, (uint8_t)(freq & 0xFF));
         gb_sound_rdj_write(GB_NR24, (uint8_t)(0x80 | ((freq >> 8) & 0x07)));
     }
     else if (ch == 2) {
-        /* CH3: Wavetable */
+        /* CH3: Wavetable. The instrument's wave preset is loaded into Wave RAM
+         * on every note so switching presets is audible immediately. */
+        uint8_t wave[16];
+        uint8_t i;
+        uint8_t level;
+
         freq = gb_calc_frequency(note);
-        shift_val = 0x20; /* 100% volume level (bits 6-5 = 01 -> 0x20) */
+        gb_inst_wave_data(in->wave, wave);
 
         if (vol_4bit == 0) {
-            shift_val = 0x00; /* Mute */
+            level = 0x00; /* Mute */
         } else if (vol_4bit < 6) {
-            shift_val = 0x60; /* 25% */
+            level = 0x60; /* 25% */
         } else if (vol_4bit < 11) {
-            shift_val = 0x40; /* 50% */
+            level = 0x40; /* 50% */
+        } else {
+            level = 0x20; /* 100% */
         }
 
-        gb_sound_rdj_write(GB_NR30, 0x80); /* Enable CH3 DAC */
-        gb_sound_rdj_write(GB_NR32, shift_val);
+        gb_sound_rdj_write(GB_NR30, 0x80); /* Enable CH3 DAC to reach Wave RAM */
+        for (i = 0; i < 16; i++) gb_sound_rdj_write(GB_WAVE_RAM + i, wave[i]);
+        gb_sound_rdj_write(GB_NR32, level);
         gb_sound_rdj_write(GB_NR33, (uint8_t)(freq & 0xFF));
         gb_sound_rdj_write(GB_NR34, (uint8_t)(0x80 | ((freq >> 8) & 0x07)));
     }
     else if (ch == 3) {
-        /* CH4: Noise */
-        noise_poly = (note & 0x0F) | ((note & 0x70) >> 1); /* Period / clock shift */
+        /* CH4: Noise. Note picks the clock shift; the instrument picks the
+         * 7-bit (metallic) vs 15-bit (hiss) polynomial width. */
+        noise_poly = (uint8_t)((note & 0x0F) | ((note & 0x70) >> 1));
+        if (in->noise) noise_poly |= 0x08; /* NR43 bit 3 = 7-bit counter */
 
         gb_sound_rdj_write(GB_NR41, 0x00);
-        gb_sound_rdj_write(GB_NR42, (vol_4bit << 4));
+        gb_sound_rdj_write(GB_NR42, gb_env_byte(in, vol_4bit));
         gb_sound_rdj_write(GB_NR43, noise_poly);
         gb_sound_rdj_write(GB_NR44, 0x80); /* Trigger */
     }

@@ -24,12 +24,14 @@
     #define RDJ_MAX_CHANNELS 4
     #define RDJ_MAX_PATTERNS 2
     #define RDJ_MAX_ROWS     32
+    #define RDJ_MAX_ORDER    8
 #elif defined(__PORT_sm83) || defined(__TARGET_gb) || defined(GBDK)
     /* Game Boy: 4 APU channels. The song must fit in 8 KB WRAM alongside the
      * console/font runtime, so keep patterns and rows small. */
     #define RDJ_MAX_CHANNELS 4
     #define RDJ_MAX_PATTERNS 2
     #define RDJ_MAX_ROWS     32
+    #define RDJ_MAX_ORDER    8
 #elif defined(__SMS__) || defined(__SDCC_z80)
     /* Sega Master System / Game Gear: 4 PSG channels. The Z80 has 8 KB of work
      * RAM and the VDP tile map lives in VRAM, so the song has to stay small
@@ -37,16 +39,19 @@
     #define RDJ_MAX_CHANNELS 4
     #define RDJ_MAX_PATTERNS 2
     #define RDJ_MAX_ROWS     32
+    #define RDJ_MAX_ORDER    8
 #elif defined(RDJ_GENESIS_HARDWARE) || defined(SGDK_GCC) || defined(__m68k__)
     #define RDJ_MAX_CHANNELS 6
     #define RDJ_MAX_PATTERNS 16
     #define RDJ_MAX_ROWS     64
+    #define RDJ_MAX_ORDER    16
 #else
     #include <stdint.h>
     #include <stddef.h>
     #define RDJ_MAX_CHANNELS 8
     #define RDJ_MAX_PATTERNS 64
     #define RDJ_MAX_ROWS     64
+    #define RDJ_MAX_ORDER    16
 #endif
 
 #include "rdj_driver.h"
@@ -71,7 +76,9 @@ typedef struct {
 
 typedef struct {
     rdj_pattern_t patterns[RDJ_MAX_PATTERNS];
-    uint8_t       order[RDJ_MAX_PATTERNS];
+    /* The order list may revisit patterns, so it has its own capacity rather
+     * than being capped by the pattern count. */
+    uint8_t       order[RDJ_MAX_ORDER];
     uint8_t       order_length;
     uint8_t       bpm;
     uint8_t       speed;

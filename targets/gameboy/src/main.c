@@ -40,6 +40,4 @@ int main(void) {
         ui_update();
         ui_render();
     }
-
-    return 0;
 }

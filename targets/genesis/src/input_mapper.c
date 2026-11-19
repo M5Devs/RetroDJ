@@ -35,6 +35,14 @@ static void patch_apply(uint8_t channel, const ym2612_patch_t *patch) {
     if (s_apply_patch) s_apply_patch(channel, patch);
 }
 
+/* Optional platform handler for the third screen (see input_mapper.h). */
+static void (*s_screen_handle)(input_tracker_state_t *state, rdj_song_t *song,
+                               uint16_t pressed, uint8_t btn_a, uint8_t btn_b);
+
+void input_mapper_set_screen_ops(const input_mapper_screen_ops_t *ops) {
+    s_screen_handle = ops ? ops->handle : NULL;
+}
+
 /* Audition through whichever sound driver the song is bound to, so the same
  * input code previews notes on the YM2612, the NES 2A03 and the Game Boy APU
  * alike. Songs with no bound driver (host-side tests) fall back to the YM2612. */
@@ -298,14 +306,14 @@ static void handle_song(input_tracker_state_t *state, rdj_song_t *song,
         }
     } else if (btn_b && !btn_a) {
         /* B + UP/DOWN: adjust the order length. */
-        if ((pressed & BUTTON_UP) && song->order_length < RDJ_MAX_PATTERNS) song->order_length++;
+        if ((pressed & BUTTON_UP) && song->order_length < RDJ_MAX_ORDER) song->order_length++;
         if ((pressed & BUTTON_DOWN) && song->order_length > 1) song->order_length--;
         if (state->song_cursor >= song->order_length) {
             state->song_cursor = (uint8_t)(song->order_length - 1);
         }
     } else if (!btn_a && !btn_b) {
         if ((pressed & BUTTON_UP) && state->song_cursor > 0) state->song_cursor--;
-        if ((pressed & BUTTON_DOWN) && state->song_cursor < RDJ_MAX_PATTERNS - 1) state->song_cursor++;
+        if ((pressed & BUTTON_DOWN) && state->song_cursor < RDJ_MAX_ORDER - 1) state->song_cursor++;
     }
 }
 
@@ -372,6 +380,16 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
     btn_a = (joy_state & BUTTON_A) != 0;
     btn_b = (joy_state & BUTTON_B) != 0;
 
+    /* ---- Shortcut mode: SELECT + LEFT/RIGHT cycles the active screen ----
+     * This is the Game Boy scheme. It shares the cycle with START+direction so
+     * both pads drive the same state machine. */
+    if ((joy_state & BUTTON_SELECT) && (pressed & (BUTTON_LEFT | BUTTON_RIGHT))) {
+        state->screen = (pressed & BUTTON_RIGHT) ? next_screen(state->screen)
+                                                 : prev_screen(state->screen);
+        state->sidebar_focus = 0;
+        state->sidebar_tab = state->screen;
+    }
+
     /* ---- Shortcut mode: START + LEFT/RIGHT cycles the active screen ---- */
     if ((joy_state & BUTTON_START) && (pressed & (BUTTON_LEFT | BUTTON_RIGHT))) {
         state->screen = (pressed & BUTTON_RIGHT) ? next_screen(state->screen)
@@ -396,11 +414,26 @@ void input_mapper_update(input_tracker_state_t *state, rdj_song_t *song, uint16_
         state->start_consumed = 0;
     }
 
-    /* ---- Per-screen editing ---- */
-    switch (state->screen) {
-        case UI_SCREEN_SONG:  handle_song(state, song, pressed, btn_a, btn_b);  break;
-        case UI_SCREEN_PATCH: handle_patch(state, song, pressed, btn_a, btn_b); break;
-        default:              handle_pat(state, song, pressed, btn_a, btn_b);   break;
+    /* ---- Per-screen editing ----
+     * SELECT is a screen modifier, so no screen may act on the d-pad while it is
+     * held; otherwise the same press would both switch screens and edit a cell. */
+    if (!(joy_state & BUTTON_SELECT)) {
+        switch (state->screen) {
+            case UI_SCREEN_SONG:
+                handle_song(state, song, pressed, btn_a, btn_b);
+                break;
+            case UI_SCREEN_PATCH:
+                if (s_screen_handle) {
+                    s_screen_handle(state, song, pressed,
+                                    (uint8_t)(btn_a ? 1 : 0), (uint8_t)(btn_b ? 1 : 0));
+                } else {
+                    handle_patch(state, song, pressed, btn_a, btn_b);
+                }
+                break;
+            default:
+                handle_pat(state, song, pressed, btn_a, btn_b);
+                break;
+        }
     }
 
     /* BUTTON_C (Genesis only): audition while held. */

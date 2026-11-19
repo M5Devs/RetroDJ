@@ -638,8 +638,8 @@ void ui_init(void) {
     g_song.bpm = 130;
     g_song.speed = 6;
     g_song.order_length = 1;
-    for (p = 0; p < RDJ_MAX_PATTERNS; p++) {
-        g_song.order[p] = (uint8_t)p;
+    for (p = 0; p < RDJ_MAX_ORDER; p++) {
+        g_song.order[p] = (uint8_t)(p < RDJ_MAX_PATTERNS ? p : 0);
     }
 
     for (p = 0; p < RDJ_MAX_PATTERNS; p++) {

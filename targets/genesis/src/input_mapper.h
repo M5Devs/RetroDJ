@@ -27,6 +27,12 @@
     #endif
 #endif
 
+#ifndef BUTTON_SELECT
+/* Game Boy SELECT. Genesis pads have no such button, so the bit is simply never
+ * set there and the SELECT shortcuts below stay dormant. */
+#define BUTTON_SELECT 0x1000
+#endif
+
 #include "core/sequencer.h"
 #include "core/rdj_ym2612.h"
 
@@ -45,6 +51,11 @@ typedef enum {
 } ui_screen_mode_t;
 
 #define UI_NUM_SCREENS 3
+
+/* The third screen slot is platform-defined: the Genesis drives a YM2612 FM
+ * patch editor there, while the Game Boy puts its APU instrument editor in the
+ * same slot. Both read as "the third screen" to the shared navigation. */
+#define UI_SCREEN_INST UI_SCREEN_PATCH
 
 /* Sidebar tab indices (order matches the on-screen tab column). */
 #define UI_TAB_PAT   0
@@ -106,5 +117,15 @@ typedef struct {
 } input_mapper_patch_ops_t;
 
 void input_mapper_set_patch_ops(const input_mapper_patch_ops_t *ops);
+
+/* Optional handler for the third screen. Genesis installs nothing and keeps the
+ * built-in YM2612 patch editor; the Game Boy installs its APU instrument editor
+ * so the shared navigation can drive a platform-specific screen. */
+typedef struct {
+    void (*handle)(input_tracker_state_t *state, rdj_song_t *song,
+                   uint16_t pressed, uint8_t btn_a, uint8_t btn_b);
+} input_mapper_screen_ops_t;
+
+void input_mapper_set_screen_ops(const input_mapper_screen_ops_t *ops);
 
 #endif

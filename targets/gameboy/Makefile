@@ -18,7 +18,8 @@ TARGET_GBC := $(OUT_DIR)/rom.gbc
 C_SRCS := src/main.c \
           src/ui_gb.c \
           ../../drivers/gb_sound/gb_rdj.c \
-          ../../backends/backend_gb_hw.c
+          ../../backends/backend_gb_hw.c \
+          ../../core/rdj_gb_inst.c
 
 # Shared with the NES target. Build it into this target's own directory so the
 # two toolchains (SDCC here, cc65 for NES) never clobber the same object file.
