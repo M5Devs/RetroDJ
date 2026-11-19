@@ -10,7 +10,7 @@
 #include "core/rdj_ym2612.h"
 #include "targets/genesis/src/input_mapper.h"
 #include "targets/genesis/src/ui.h"
-#include "core/rdj_gb_inst.h"
+#include "drivers/gb_sound/rdj_gb_inst.h"
 #include "drivers/gb_sound/gb_rdj.h"
 
 extern void vgm_open(const char *filename);

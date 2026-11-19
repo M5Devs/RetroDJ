@@ -95,7 +95,7 @@ jobs:
             backends/backend_gb_hw.c \
             targets/genesis/src/ui.c \
             targets/genesis/src/input_mapper.c \
-            core/rdj_gb_inst.c \
+            drivers/gb_sound/rdj_gb_inst.c \
             -I. -Icore/ -o test_runner
           ./test_runner
 

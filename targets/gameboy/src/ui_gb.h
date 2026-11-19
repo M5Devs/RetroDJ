@@ -17,7 +17,7 @@
 #include "core/sequencer.h"
 #include "core/rdj_driver.h"
 #include "core/rdj_backend.h"
-#include "core/rdj_gb_inst.h"
+#include "drivers/gb_sound/rdj_gb_inst.h"
 
 extern rdj_driver_t gb_sound_driver;
 extern rdj_backend_t backend_gb_hw;

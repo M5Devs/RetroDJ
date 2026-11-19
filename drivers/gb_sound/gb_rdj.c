@@ -30,7 +30,7 @@
 
 #include "core/rdj_driver.h"
 #include "core/rdj_backend.h"
-#include "core/rdj_gb_inst.h"
+#include "rdj_gb_inst.h"
 
 /* Register map (Game Boy APU hardware registers $FF10 - $FF26) */
 #define GB_NR10 0xFF10  /* CH1 Sweep */

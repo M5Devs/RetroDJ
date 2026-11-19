@@ -5,7 +5,7 @@
 #define RDJ_GB_SOUND_H
 
 #include <stdint.h>
-#include "core/rdj_gb_inst.h"
+#include "rdj_gb_inst.h"
 
 /* Instrument bank shared by the driver and the [INST] editor. Slot is taken
  * modulo GB_INST_COUNT. The bank is populated with defaults on first use. */

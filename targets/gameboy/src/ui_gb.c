@@ -20,7 +20,7 @@
 #include "ui_gb.h"
 #include "core/rdj_driver.h"
 #include "core/rdj_backend.h"
-#include "core/rdj_gb_inst.h"
+#include "drivers/gb_sound/rdj_gb_inst.h"
 #include "drivers/gb_sound/gb_rdj.h"
 
 #include <stdio.h>

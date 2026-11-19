@@ -1,7 +1,7 @@
 /* RDJ Game Boy APU Instrument Model */
 /* GPLv3 - RetroDJ Project */
 
-#include "core/rdj_gb_inst.h"
+#include "rdj_gb_inst.h"
 
 /* Ranges for the [INST] screen's editable rows, in GB_INST_ROW_* order. */
 const uint8_t gb_inst_param_max[GB_INST_NUM_PARAMS] = {
